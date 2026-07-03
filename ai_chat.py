@@ -58,8 +58,8 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # Set these as environment variables on Render instead.
 GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "AQ.Ab8RN6ISxMXytCp9aRuWkXQ8YvXh2HRQYncggoM6jTPzxJe5Ag")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","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")
-HF_API_KEY        = os.environ.get("HF_API_KEY",        "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")
+OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY",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
+HF_API_KEY        = os.environ.get("HF_API_KEY",       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
 
 # --- Model names -------------------------------------------------------------
 GEMINI_MODEL      = "gemini-2.5-flash"
