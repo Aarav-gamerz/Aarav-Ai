@@ -56,28 +56,58 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # --- API Keys (hardcoded fallbacks — override via environment variables) ------
 # WARNING: don't commit a file with real keys to a public GitHub repo.
 # Set these as environment variables on Render instead.
-GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "")
-GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
-CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","")
-HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
+GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
+CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "csk-2ph5f5nxt3jrtwj5edcehpr5xh96628268fvjh4e658m4t6h")
+OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","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")
 
 # --- Model names -------------------------------------------------------------
-GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
-OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
-HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
-CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
-OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
-OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
+CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "llama-3.3-70b")
+OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",      "llama3.1")
+OLLAMA_URL        = os.environ.get("OLLAMA_URL",        "http://localhost:11434").rstrip("/")
 
-GEMINI_STREAM_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:streamGenerateContent"
-)
+# --- Aarav AI Model Tiers ---------------------------------------------------
+# Each "Aarav" model maps to a real backend model.
+# Users see: Aarav 1.0, Aarav 2.0, Aarav 2.5, Aarav 3.5, Aarav Ultra
+# Internally each maps to a different provider/model combo.
+AARAV_MODELS = {
+    "aarav-1.0": {
+        "name":        "Aarav 1.0",
+        "description": "Fast & lightweight — great for quick questions",
+        "provider":    "groq",
+        "model":       "llama-3.1-8b-instant",
+    },
+    "aarav-2.0": {
+        "name":        "Aarav 2.0",
+        "description": "Balanced — good for everyday tasks",
+        "provider":    "groq",
+        "model":       "llama-3.3-70b-versatile",
+    },
+    "aarav-2.5": {
+        "name":        "Aarav 2.5",
+        "description": "Smart & fast — best for most tasks",
+        "provider":    "cerebras",
+        "model":       "llama-3.3-70b",
+    },
+    "aarav-3.5": {
+        "name":        "Aarav 3.5",
+        "description": "Advanced reasoning — great for complex tasks",
+        "provider":    "cerebras",
+        "model":       "llama-4-scout-17b-16e-instruct",
+    },
+    "aarav-ultra": {
+        "name":        "Aarav Ultra",
+        "description": "Most powerful — for the hardest problems",
+        "provider":    "cerebras",
+        "model":       "qwen-3-32b",
+    },
+}
+DEFAULT_AARAV_MODEL = "aarav-2.5"
 
-# keep old name for compatibility with existing references below
-API_KEY = GEMINI_API_KEY
-MODEL   = GEMINI_MODEL
+# VIP password to unlock Aarav Ultra — change this to whatever you want
+VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
+VIP_MODELS   = {"aarav-ultra"}  # models that require VIP unlock
+
 SYSTEM_PROMPT = (
     "You are Aarav AI, a smart and friendly AI assistant made by Aarav Singh. "
     "If asked who made you, say you are Aarav AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
@@ -100,17 +130,6 @@ SYSTEM_PROMPT = (
     "3. NEVER repeat information already given earlier in the conversation. Build on it. "
     "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
     "5. Keep answers concise unless the user asks for detail."
-)
-
-# Extra instruction appended ONLY for Gemini, which actually has a real google_search tool wired up.
-# Other providers (Groq/Cerebras/OpenRouter/HF/Ollama) have no real search access, so telling them
-# "you have search" makes them hallucinate fake tool-call JSON into the visible reply — hence this
-# is kept separate from the base SYSTEM_PROMPT above.
-GEMINI_SEARCH_ADDENDUM = (
-    " WEB SEARCH: You have access to Google Search. When the user asks about current events, "
-    "live prices, news, sports scores, weather, or anything that needs up-to-date information, "
-    "use the search tool to find the answer. Do not say you cannot search the web. When you use "
-    "search results, translate/summarize them into the reply language — never paste a mix of languages."
 )
 
 app = Flask(__name__)
@@ -290,7 +309,7 @@ PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Aarav AI</title>
 <style>
   :root {
@@ -348,23 +367,6 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
-
-  /* Mobile "more" menu — hidden on desktop, replaces the individual header
-     icon buttons on narrow screens to keep the header uncluttered and
-     each remaining tap target comfortably large. */
-  #more-btn { display:none; background:none; border:1px solid var(--border); color:var(--muted);
-    width:38px; height:38px; border-radius:6px; font-size:18px; cursor:pointer; flex-shrink:0;
-    align-items:center; justify-content:center; touch-action:manipulation;
-    -webkit-tap-highlight-color:transparent; }
-  #more-menu-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:149; }
-  #more-menu { display:none; position:fixed; top:calc(52px + env(safe-area-inset-top)); right:12px;
-    background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:6px;
-    flex-direction:column; gap:2px; z-index:150; box-shadow:0 10px 30px rgba(0,0,0,.4); min-width:190px; }
-  #more-menu button { display:flex; align-items:center; gap:10px; background:none; border:none;
-    color:var(--text); font-size:14px; padding:12px 14px; border-radius:8px; cursor:pointer;
-    text-align:left; width:100%; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
-  #more-menu button:active { background:var(--accent-dim); }
-  #more-menu.show, #more-menu-overlay.show { display:flex; }
 
   /* Fullscreen toggle — lives in the header so it's reachable with one tap
      at the top of the screen, alongside the other header icon buttons. */
@@ -502,16 +504,12 @@ PAGE = r"""<!DOCTYPE html>
   @media(max-width:768px) {
     :root { --sidebar-w: 78vw; }
 
-    html, body { overscroll-behavior-y: contain; }
-    #messages-wrap { overscroll-behavior-y: contain; }
-
     /* Sidebar slides in as overlay — never pushes content */
     #sidebar { position:fixed; top:0; left:0; z-index:100; height:100%;
       height:-webkit-fill-available; width:var(--sidebar-w) !important;
       transform:translateX(0); transition:transform .25s ease;
       box-shadow:4px 0 24px rgba(0,0,0,.5); }
     #sidebar.hidden { transform:translateX(-105%); margin-left:0 !important; }
-    #sidebar-footer { padding-bottom:max(10px, env(safe-area-inset-bottom)); }
 
     /* Show overlay when sidebar open */
     #sidebar-overlay { display:block; }
@@ -519,35 +517,35 @@ PAGE = r"""<!DOCTYPE html>
     /* Main app always takes full width */
     .app { width:100% !important; flex:1; }
 
-    header { padding:calc(10px + env(safe-area-inset-top)) 10px 10px; }
+    header { padding:calc(10px + env(safe-area-inset-top)) 12px 10px; }
     header h1 { font-size:14px; }
-    #sidebar-toggle { width:40px; height:40px; font-size:15px; }
-
-    /* Collapse the individual header icons into a single "more" menu on mobile */
-    #header-actions { display:none; }
-    #more-btn { display:flex; }
+    #sidebar-toggle { width:38px; height:38px; font-size:14px; }
+    #name-btn { width:38px; height:38px; font-size:14px; }
+    #export-btn { width:38px; height:38px; font-size:14px; }
+    #fullscreen-btn { width:38px; height:38px; font-size:14px; }
+    #clear-btn { width:38px; height:38px; font-size:14px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
     .msg { max-width:90%; font-size:14px; padding:10px 12px; }
     .msg-row { max-width:90%; }
-    .msg-actions { opacity:1; height:28px; } /* no hover on touch — keep always visible */
-    .msg-actions button { font-size:14px; padding:5px 10px; min-width:36px; min-height:32px; }
+    .msg-actions { opacity:1; height:26px; } /* no hover on touch — keep always visible */
+    .msg-actions button { font-size:13px; padding:4px 9px; min-width:30px; min-height:26px; }
 
     .input-area { padding:8px 10px max(10px,env(safe-area-inset-bottom)); }
     .input-row { padding:6px 8px; }
     textarea { font-size:16px; } /* 16px prevents iOS zoom */
-    .tool-btn { width:40px; height:40px; font-size:18px; }
-    #send-btn { width:40px; height:40px; font-size:17px; }
+    .tool-btn { width:34px; height:34px; font-size:17px; }
+    #send-btn { width:34px; height:34px; font-size:16px; }
 
     .empty-state h2 { font-size:19px; }
     .empty-state p { font-size:13px; }
-    #scroll-btn { bottom:calc(80px + env(safe-area-inset-bottom)); right:12px; width:38px; height:38px; }
+    #scroll-btn { bottom:80px; right:12px; width:34px; height:34px; }
 
-    #new-chat-btn { margin:10px; padding:12px; font-size:14px; min-height:44px; }
+    #new-chat-btn { margin:10px; padding:10px 12px; font-size:13.5px; }
     .conv-item { padding:10px 8px; font-size:13px; min-height:44px; }
-    .conv-item .rename-btn { opacity:1; min-width:32px; min-height:32px; }
-    .conv-item .del-btn { opacity:1; min-width:32px; min-height:32px; }
+    .conv-item .rename-btn { opacity:1; }
+    .conv-item .del-btn { opacity:1; }
     #sidebar-footer { font-size:11px; padding:10px 12px; }
   }
 
@@ -571,8 +569,11 @@ PAGE = r"""<!DOCTYPE html>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Aarav AI</h1>
+        <select id="model-select" title="Select model" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:13px;cursor:pointer;outline:none;max-width:140px;">
+          <option value="">Loading...</option>
+        </select>
       </div>
-      <div class="right" id="header-actions">
+      <div class="right">
         <button id="fullscreen-btn" type="button" title="Fullscreen">
           <span id="fullscreen-icon">⛶</span>
         </button>
@@ -580,15 +581,7 @@ PAGE = r"""<!DOCTYPE html>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn" title="Delete this chat">🗑</button>
       </div>
-      <button id="more-btn" type="button" title="More options">⋮</button>
     </header>
-    <div id="more-menu-overlay"></div>
-    <div id="more-menu">
-      <button id="more-fullscreen" type="button"><span id="more-fullscreen-icon">⛶</span> Fullscreen</button>
-      <button id="more-name" type="button">🙂 Your name</button>
-      <button id="more-export" type="button">⬇ Export chat</button>
-      <button id="more-clear" type="button">🗑 Delete chat</button>
-    </div>
 
     <div id="messages-wrap">
       <div id="messages">
@@ -667,6 +660,7 @@ const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
 const form         = document.getElementById('chat-form');
 const input        = document.getElementById('input');
+const modelSelect  = document.getElementById('model-select');
 const sendBtn      = document.getElementById('send-btn');
 const clearBtn     = document.getElementById('clear-btn');
 const convListEl   = document.getElementById('conv-list');
@@ -679,14 +673,6 @@ const nameInput     = document.getElementById('name-input');
 const nameCancelBtn = document.getElementById('name-cancel-btn');
 const nameSaveBtn   = document.getElementById('name-save-btn');
 const exportBtn     = document.getElementById('export-btn');
-const moreBtn        = document.getElementById('more-btn');
-const moreMenu       = document.getElementById('more-menu');
-const moreMenuOverlay= document.getElementById('more-menu-overlay');
-const moreFullscreen = document.getElementById('more-fullscreen');
-const moreFullscreenIcon = document.getElementById('more-fullscreen-icon');
-const moreName        = document.getElementById('more-name');
-const moreExport      = document.getElementById('more-export');
-const moreClear       = document.getElementById('more-clear');
 const sidebar      = document.getElementById('sidebar');
 const fileInput    = document.getElementById('file-input');
 const attachBtn    = document.getElementById('attach-btn');
@@ -701,6 +687,92 @@ const speakingIndicator = document.getElementById('speaking-indicator');
 const stopSpeakBtn = document.getElementById('stop-speak-btn');
 
 let activeConvId = null;
+let selectedModel = 'aarav-2.5';
+let vipUnlocked   = false;
+
+// VIP modal
+function showVipModal() {
+  const existing = document.getElementById('vip-modal');
+  if (existing) { existing.style.display='flex'; return; }
+  const modal = document.createElement('div');
+  modal.id = 'vip-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;';
+  modal.innerHTML = `
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:28px 24px;width:320px;max-width:90vw;">
+      <div style="font-size:22px;margin-bottom:6px;">🔒 VIP Access</div>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:18px;">Aarav Ultra is for VIP users only. Enter your VIP password to unlock it.</div>
+      <input id="vip-pw-input" type="password" placeholder="VIP password"
+        style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:14px;outline:none;margin-bottom:12px;">
+      <div id="vip-error" style="color:#ef4444;font-size:12px;margin-bottom:10px;display:none;">Wrong password. Try again.</div>
+      <div style="display:flex;gap:8px;">
+        <button id="vip-submit" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;">Unlock</button>
+        <button id="vip-cancel" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;font-size:14px;cursor:pointer;">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const pwIn = modal.querySelector('#vip-pw-input');
+  const errEl = modal.querySelector('#vip-error');
+  pwIn.focus();
+  modal.querySelector('#vip-cancel').addEventListener('click', () => {
+    modal.style.display = 'none';
+    modelSelect.value = selectedModel; // revert to previous selection
+  });
+  modal.querySelector('#vip-submit').addEventListener('click', async () => {
+    const pw = pwIn.value.trim();
+    const r = await fetch('/api/vip-unlock', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:pw}) });
+    const d = await r.json();
+    if (d.success) {
+      vipUnlocked = true; modal.style.display = 'none';
+      selectedModel = 'aarav-ultra'; modelSelect.value = 'aarav-ultra';
+      // Remove lock icon from Ultra option
+      const opt = modelSelect.querySelector('option[value="aarav-ultra"]');
+      if (opt) opt.textContent = 'Aarav Ultra ✨';
+    } else {
+      errEl.style.display = 'block'; pwIn.value = ''; pwIn.focus();
+    }
+  });
+  pwIn.addEventListener('keydown', (e) => { if(e.key==='Enter') modal.querySelector('#vip-submit').click(); });
+}
+
+// Load available Aarav models into the selector
+async function loadModels() {
+  try {
+    const r = await fetch('/api/models');
+    const d = await r.json();
+    // Check VIP status
+    const vs = await fetch('/api/vip-status');
+    const vd = await vs.json();
+    vipUnlocked = vd.vip;
+    modelSelect.innerHTML = '';
+    d.models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      if (m.vip && !vipUnlocked) {
+        opt.textContent = m.name + ' 🔒';
+        opt.dataset.vip = '1';
+      } else if (m.vip && vipUnlocked) {
+        opt.textContent = m.name + ' ✨';
+      } else {
+        opt.textContent = m.name;
+      }
+      opt.title = m.description + (m.vip ? ' (VIP only)' : '');
+      if (m.id === d.default) opt.selected = true;
+      modelSelect.appendChild(opt);
+    });
+    selectedModel = d.default;
+  } catch {
+    modelSelect.innerHTML = '<option value="aarav-2.5">Aarav 2.5</option>';
+  }
+}
+modelSelect.addEventListener('change', () => {
+  const opt = modelSelect.options[modelSelect.selectedIndex];
+  if (opt && opt.dataset.vip === '1' && !vipUnlocked) {
+    showVipModal();
+  } else {
+    selectedModel = modelSelect.value;
+  }
+});
+loadModels();
 let pendingFile  = null;
 let recognition  = null;
 let currentUtterance = null;
@@ -1021,10 +1093,17 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
         attachment,
         user_name: getUserName(),
         regenerate: !!regenerate,
+        model: selectedModel,
       })
     });
     if (!r.ok || !r.body) {
       hideTyping();
+      if (r.status === 403) {
+        const errData = await r.json().catch(() => ({}));
+        if (errData.error === 'vip_required') {
+          showVipModal(); return;
+        }
+      }
       addMessage('error', 'Something went wrong. Try again.');
       return;
     }
@@ -1160,29 +1239,6 @@ async function toggleFullscreen() {
 }
 fullscreenBtn.addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
-
-// --- Auto-fullscreen on open ---
-// Browsers block real fullscreen requests until there's been a genuine user
-// gesture (tap/click) — this is a security rule, not something any page can
-// override. So: apply the "maximized" view immediately (no permission needed),
-// then silently promote to real, OS-level fullscreen on the very first tap.
-document.body.classList.add('pseudo-fullscreen');
-updateFullscreenBtn();
-
-if (fsSupported) {
-  const autoRequestFullscreen = () => {
-    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-      const el = document.documentElement;
-      const req = el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen();
-      Promise.resolve(req).then(() => {
-        document.body.classList.remove('pseudo-fullscreen');
-        updateFullscreenBtn();
-      }).catch(() => {}); // user may have declined — stay in pseudo-fullscreen, no error shown
-    }
-    document.removeEventListener('pointerdown', autoRequestFullscreen);
-  };
-  document.addEventListener('pointerdown', autoRequestFullscreen, { once: true });
-}
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
 // "What should Aarav AI call you?" — stored locally, sent with every chat request
@@ -1217,15 +1273,13 @@ if (!localStorage.getItem('aarav_name_prompted')) {
 // Hide sidebar by default on mobile
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
-
-async function doClearChat() {
+clearBtn.addEventListener('click', async () => {
   if (!activeConvId) return;
   await fetch('/api/conversations/' + activeConvId, { method: 'DELETE' });
   startNewChat();
-}
-clearBtn.addEventListener('click', doClearChat);
+});
 
-async function doExportChat() {
+exportBtn.addEventListener('click', async () => {
   if (!activeConvId) { alert('Start or open a chat first.'); return; }
   try {
     const r = await fetch('/api/conversations/' + activeConvId);
@@ -1249,35 +1303,7 @@ async function doExportChat() {
   } catch (err) {
     alert('Export failed: ' + err.message);
   }
-}
-exportBtn.addEventListener('click', doExportChat);
-
-// --- Mobile "more" menu: consolidates fullscreen/name/export/delete into one panel ---
-function openMoreMenu() {
-  if (moreFullscreenIcon) moreFullscreenIcon.textContent = fullscreenIcon.textContent;
-  moreMenu.classList.add('show');
-  moreMenuOverlay.classList.add('show');
-}
-function closeMoreMenu() {
-  moreMenu.classList.remove('show');
-  moreMenuOverlay.classList.remove('show');
-}
-moreBtn.addEventListener('click', openMoreMenu);
-moreMenuOverlay.addEventListener('click', closeMoreMenu);
-moreFullscreen.addEventListener('click', () => { closeMoreMenu(); toggleFullscreen(); });
-moreName.addEventListener('click', () => { closeMoreMenu(); openNameModal(); });
-moreExport.addEventListener('click', () => { closeMoreMenu(); doExportChat(); });
-moreClear.addEventListener('click', () => { closeMoreMenu(); doClearChat(); });
-
-// --- Swipe left to close the sidebar on mobile ---
-let touchStartX = null;
-sidebar.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; }, { passive: true });
-sidebar.addEventListener('touchend', (e) => {
-  if (touchStartX === null) return;
-  const dx = e.changedTouches[0].clientX - touchStartX;
-  if (dx < -60) closeSidebar();
-  touchStartX = null;
-}, { passive: true });
+});
 
 // Initial load
 (async () => {
@@ -1285,6 +1311,28 @@ sidebar.addEventListener('touchend', (e) => {
   if (convs.length > 0) openConversation(convs[0].id);
   else showEmptyState();
 })();
+
+// Auto-fullscreen on first user interaction
+// (Browsers block fullscreen requests without a user gesture — so we hook
+// into the first click/tap/keydown anywhere on the page and request it then.)
+let autoFsTriggered = false;
+async function autoFullscreen() {
+  if (autoFsTriggered) return;
+  autoFsTriggered = true;
+  try {
+    const el = document.documentElement;
+    if (el.requestFullscreen) await el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else document.body.classList.add('pseudo-fullscreen');
+    updateFullscreenBtn();
+  } catch {
+    document.body.classList.add('pseudo-fullscreen');
+    updateFullscreenBtn();
+  }
+}
+['click','touchstart','keydown'].forEach(evt =>
+  document.addEventListener(evt, autoFullscreen, { once: true, capture: true })
+);
 </script>
 </body>
 </html>
@@ -1512,8 +1560,88 @@ def huggingface_stream_chunks(messages):
 
 
 
+def groq_stream_chunks_with_model(messages, model):
+    """Stream from Groq with a specific model (for Aarav model tiers)."""
+    if not GROQ_API_KEY:
+        yield "[Groq API key not configured]"; return
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"): continue
+                d = line[5:].strip()
+                if d == "[DONE]": break
+                try:
+                    c = json.loads(d)["choices"][0]["delta"].get("content", "")
+                    if c: yield c
+                except: continue
+            return
+        yield f"[Groq error {resp.status_code}]"
+    except requests.RequestException as e:
+        yield f"[Groq connection error: {e}]"
+
+
+def openrouter_stream_chunks_with_model(messages, model):
+    """Stream from OpenRouter with a specific model (for Aarav model tiers)."""
+    if not OPENROUTER_API_KEY:
+        yield "[OpenRouter API key not configured]"; return
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json",
+                     "HTTP-Referer": "https://aarav-ai.onrender.com", "X-Title": "Aarav AI"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"): continue
+                d = line[5:].strip()
+                if d == "[DONE]": break
+                try:
+                    c = json.loads(d)["choices"][0]["delta"].get("content", "")
+                    if c: yield c
+                except: continue
+            return
+        yield f"[OpenRouter error {resp.status_code}]"
+    except requests.RequestException as e:
+        yield f"[OpenRouter connection error: {e}]"
+
+
+def huggingface_stream_chunks_with_model(messages, model):
+    """Stream from HuggingFace with a specific model (for Aarav model tiers)."""
+    if not HF_API_KEY:
+        yield "[HuggingFace API key not configured]"; return
+    try:
+        resp = requests.post(
+            f"https://api-inference.huggingface.co/models/{model}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"): continue
+                d = line[5:].strip()
+                if d == "[DONE]": break
+                try:
+                    c = json.loads(d)["choices"][0]["delta"].get("content", "")
+                    if c: yield c
+                except: continue
+            return
+        yield f"[HuggingFace error {resp.status_code}]"
+    except requests.RequestException as e:
+        yield f"[HuggingFace connection error: {e}]"
+
+
+
 def cerebras_stream_chunks(messages):
-    """Stream from Cerebras AI (very fast, generous free tier, works on servers)."""
+    """Stream from Cerebras AI (very fast, works on servers)."""
     if not CEREBRAS_API_KEY:
         return
     try:
@@ -1525,25 +1653,46 @@ def cerebras_stream_chunks(messages):
         )
         if resp.status_code == 200:
             for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
+                if not line or not line.startswith("data:"): continue
                 data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
+                if data_str == "[DONE]": break
                 try:
                     obj = json.loads(data_str)
                     chunk = obj["choices"][0]["delta"].get("content", "")
-                    if chunk:
-                        yield chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
+                    if chunk: yield chunk
+                except (json.JSONDecodeError, KeyError, IndexError): continue
             return
         else:
             yield f"[Cerebras error {resp.status_code}: {resp.text[:300]}]"
-            return
     except requests.RequestException as e:
         yield f"[Cerebras connection error: {e}]"
-        return
+
+
+def cerebras_stream_chunks_with_model(messages, model):
+    """Stream from Cerebras with a specific model (for Aarav model tiers)."""
+    if not CEREBRAS_API_KEY:
+        yield "[Cerebras API key not configured]"; return
+    try:
+        resp = requests.post(
+            "https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"): continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]": break
+                try:
+                    obj = json.loads(data_str)
+                    chunk = obj["choices"][0]["delta"].get("content", "")
+                    if chunk: yield chunk
+                except (json.JSONDecodeError, KeyError, IndexError): continue
+            return
+        yield f"[Cerebras error {resp.status_code}]"
+    except requests.RequestException as e:
+        yield f"[Cerebras connection error: {e}]"
 
 
 # --- Round-robin provider rotation ------------------------------------------
@@ -1563,17 +1712,10 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
 
     # Build the full list of available providers (only those with keys)
     all_providers = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         all_providers.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
-    if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
-        all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
-    if PROVIDER == "huggingface" and HF_API_KEY:
-        # HuggingFace free tier blocks server IPs (Render etc) — only use if explicitly set
-        all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
     if PROVIDER == "ollama":
         all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
 
@@ -1644,6 +1786,38 @@ def gemini_stream_chunks(payload):
             continue
 
 
+@app.route("/api/models", methods=["GET"])
+def get_models():
+    """Return available Aarav model tiers for the frontend selector."""
+    return jsonify({
+        "models": [
+            {
+                "id": k,
+                "name": v["name"],
+                "description": v["description"],
+                "vip": k in VIP_MODELS,
+            }
+            for k, v in AARAV_MODELS.items()
+        ],
+        "default": DEFAULT_AARAV_MODEL
+    })
+
+
+@app.route("/api/vip-unlock", methods=["POST"])
+def vip_unlock():
+    """Unlock VIP models with a password."""
+    data = request.get_json(force=True) or {}
+    if data.get("password") == VIP_PASSWORD:
+        session["vip"] = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Wrong password"}), 403
+
+
+@app.route("/api/vip-status", methods=["GET"])
+def vip_status():
+    return jsonify({"vip": bool(session.get("vip"))})
+
+
 @app.route("/api/chat", methods=["POST"])
 @login_required
 def chat():
@@ -1653,6 +1827,12 @@ def chat():
     attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
     user_name = (data.get("user_name") or "").strip()[:60]  # what Aarav AI should call the user
     regenerate = bool(data.get("regenerate"))
+    aarav_model_id = (data.get("model") or DEFAULT_AARAV_MODEL).strip()
+    aarav_model = AARAV_MODELS.get(aarav_model_id, AARAV_MODELS[DEFAULT_AARAV_MODEL])
+
+    # VIP check — block access to locked models
+    if aarav_model_id in VIP_MODELS and not session.get("vip"):
+        return jsonify({"error": "vip_required"}), 403
 
     if regenerate:
         if not conv_id:
@@ -1711,28 +1891,30 @@ def chat():
     if user_name:
         effective_system_prompt += (
             f" The user has told you their preferred name is \"{user_name}\". "
-            f"Address them as {user_name} naturally where it fits (e.g. greetings, "
-            f"acknowledgements) — don't force it into every single reply."
+            f"Address them as {user_name} naturally where it fits."
         )
-    # Only the real Gemini call gets the "you have search" instruction — fallback
-    # providers don't have real search, so giving them that instruction makes them
-    # hallucinate fake tool-call JSON into the visible reply.
-    gemini_system_prompt = effective_system_prompt + GEMINI_SEARCH_ADDENDUM
 
     payload = {
         "contents": gemini_contents,
-        "systemInstruction": {"parts": [{"text": gemini_system_prompt}]},
-        "tools": [{"google_search": {}}],
+        "systemInstruction": {"parts": [{"text": effective_system_prompt}]},
     }
 
     def generate():
         full_reply = []
-        if PROVIDER == "ollama":
-            chunk_source = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
-        else:
-            chunk_source = auto_stream_chunks(payload, messages, effective_system_prompt)
+        selected_provider = aarav_model["provider"]
+        selected_model    = aarav_model["model"]
+        openai_msgs = to_openai_messages(messages, effective_system_prompt)
 
-        for chunk in chunk_source:
+        if selected_provider == "groq":
+            from_gen = groq_stream_chunks_with_model(openai_msgs, selected_model)
+        elif selected_provider == "cerebras":
+            from_gen = cerebras_stream_chunks_with_model(openai_msgs, selected_model)
+        elif PROVIDER == "ollama":
+            from_gen = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
+        else:
+            from_gen = auto_stream_chunks(payload, messages, effective_system_prompt)
+
+        for chunk in from_gen:
             full_reply.append(chunk)
             yield chunk
         messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
@@ -1743,45 +1925,12 @@ def chat():
     return resp
 
 
-@app.route("/api/generate-image", methods=["POST"])
-@login_required
-def generate_image():
-    data = request.get_json(force=True) or {}
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-    if not HF_API_KEY:
-        return jsonify({"error": "No HuggingFace key configured"}), 503
-    # Use FLUX.1-schnell — fast, high quality, free on HF
-    model = "black-forest-labs/FLUX.1-schnell"
-    try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
-            headers={"Authorization": f"Bearer {HF_API_KEY}"},
-            json={"inputs": prompt},
-            timeout=60,
-        )
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            img_b64 = base64.b64encode(resp.content).decode("utf-8")
-            return jsonify({"image": img_b64})
-        else:
-            return jsonify({"error": f"Image generation failed ({resp.status_code})"}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": str(e)}), 502
-
-
 if __name__ == "__main__":
     active = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        active.append(f"Gemini({GEMINI_MODEL})")
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         active.append(f"Groq({GROQ_MODEL})")
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         active.append(f"Cerebras({CEREBRAS_MODEL})")
-    if PROVIDER in ("auto", "openrouter") and OPENROUTER_API_KEY:
-        active.append(f"OpenRouter({OPENROUTER_MODEL})")
-    if PROVIDER in ("auto", "huggingface") and HF_API_KEY:
-        active.append(f"HuggingFace({HF_MODEL})")
     if PROVIDER == "ollama":
         active.append(f"Ollama({OLLAMA_MODEL}@{OLLAMA_URL})")
     providers_str = " → ".join(active) if active else "none configured!"
