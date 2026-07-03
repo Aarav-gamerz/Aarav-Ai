@@ -58,14 +58,16 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # Set these as environment variables on Render instead.
 GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "AQ.Ab8RN6ISxMXytCp9aRuWkXQ8YvXh2HRQYncggoM6jTPzxJe5Ag")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY",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
-HF_API_KEY        = os.environ.get("HF_API_KEY",       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
+CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "csk-2ph5f5nxt3jrtwj5edcehpr5xh96628268fvjh4e658m4t6h")
+OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","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")
+HF_API_KEY        = os.environ.get("HF_API_KEY",        "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")
 
 # --- Model names -------------------------------------------------------------
 GEMINI_MODEL      = "gemini-2.5-flash"
-GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-70b-versatile")
-OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "meta-llama/llama-3.1-8b-instruct:free")
+GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
+OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
+CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
 OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
 
@@ -78,30 +80,22 @@ API_KEY = GEMINI_API_KEY
 MODEL   = GEMINI_MODEL
 SYSTEM_PROMPT = (
     "You are Aarav AI, a smart and friendly AI assistant made by Aarav Singh. "
-
-    "CRITICAL LANGUAGE RULE — follow this strictly every single reply: "
-    "Read the user's message. Identify what language it is written in. Reply in EXACTLY that language. "
-    "English message → English reply ONLY. Zero Hindi or Hinglish words. "
-    "Hindi message (Devanagari script) → Hindi reply ONLY. Zero English words except proper nouns. "
-    "Hinglish message (Roman script Hindi like 'kya haal hai') → Hinglish reply ONLY. "
-    "NEVER add translations in brackets. NEVER switch language mid-reply. "
-    "If unsure, default to English. "
-
-    "SEARCH & NEWS: You have access to real-time news through your system. "
-    "When users ask about news, current events, cricket, sports, weather — answer using the news data provided to you. "
-    "If no news data is provided, say 'Let me know what topic you want news on and I'll fetch it for you.' "
-    "NEVER say 'I cannot do Google search' or 'I have no internet access'. "
-    "Instead say you can help with news and current events. "
-
-    "KNOWLEDGE: Never mention a specific cutoff date like 2023. "
-
-    "BEHAVIOR: Never repeat yourself. Short direct answers. No filler sentences. "
-    "If user says 'hi' just say hi back warmly — don't ask 'iska kya matlab hai'. "
-    "If user tells you their name, remember it. "
-    "If asked who made you, say once: 'I am Aarav AI, made by Aarav Singh.' "
-    "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic. "
-    "Help with anything: questions, writing, coding, math, ideas, chatting. "
-    "For code, use markdown code blocks."
+    "If asked who made you, say you are Aarav AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
+    "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
+    "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
+    "When writing code, always wrap it in markdown code blocks with the language name. "
+    "LANGUAGE: Always reply in the same language the user writes in. "
+    "If they write in Hindi, reply in Hindi. If they write in Spanish, reply in Spanish. "
+    "If they mix languages, match their mix. Never force English on the user. "
+    "WEB SEARCH: You have access to Google Search. When the user asks about current events, "
+    "live prices, news, sports scores, weather, or anything that needs up-to-date information, "
+    "use the search tool to find the answer. Do not say you cannot search the web. "
+    "ANTI-REPETITION RULES — follow strictly every reply: "
+    "1. NEVER restate or echo back what the user just said. Jump straight to the answer. "
+    "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
+    "3. NEVER repeat information already given earlier in the conversation. Build on it. "
+    "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
+    "5. Keep answers concise unless the user asks for detail."
 )
 
 app = Flask(__name__)
@@ -283,18 +277,16 @@ PAGE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Aarav AI</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#212121; --panel:#2f2f2f; --border:#3f3f3f;
+    --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
     --text:#ececec; --muted:#8e8ea0; --accent:#10a37f;
-    --accent-dim:#1a3a30; --user-bubble:#2f2f2f; --user-text:#ececec;
-    --ai-bubble:#212121; --sidebar-w:260px;
+    --accent-dim:#1a3a30; --user-bubble:#2a2a2a; --user-text:#ececec;
+    --ai-bubble:#1a1a1a; --sidebar-w:260px;
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; background:var(--bg); color:var(--text);
-    font-family:'Inter','Noto Sans Devanagari',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:hidden; }
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; overflow:hidden; }
   .layout { display:flex; height:100vh; }
 
   /* Sidebar */
@@ -389,7 +381,7 @@ PAGE = """<!DOCTYPE html>
   #send-btn { background:var(--accent); color:#fff; border:none; border-radius:10px;
     width:36px; height:36px; font-size:18px; cursor:pointer; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; }
-  #send-btn:disabled { opacity:.4; cursor:not-allowed; }
+  #send-btn:disabled { background:var(--accent-dim); color:var(--muted); cursor:not-allowed; }
   #voice-btn.listening { color:#ef4444; animation:pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
@@ -403,32 +395,67 @@ PAGE = """<!DOCTYPE html>
   #messages-wrap::-webkit-scrollbar, #conv-list::-webkit-scrollbar { width:6px; }
   #messages-wrap::-webkit-scrollbar-thumb, #conv-list::-webkit-scrollbar-thumb
     { background:var(--border); border-radius:4px; }
-  #sidebar-overlay { display:none; position:fixed; inset:0; z-index:15; background:rgba(0,0,0,.5); }
-  @media(max-width:640px) {
-    #sidebar { position:fixed; top:0; left:0; z-index:20; height:100vh; box-shadow:4px 0 20px rgba(0,0,0,.4); }
-    #sidebar.hidden { margin-left:calc(-1 * var(--sidebar-w)); }
-    #sidebar.hidden ~ #sidebar-overlay { display:none !important; }
-    #sidebar-overlay.show { display:block; }
-    .app { width:100vw; }
-    #messages { padding:16px 12px; }
-    .msg { max-width:92%; font-size:14px; }
-    .input-area { padding:8px 12px 12px; }
-    header { padding:10px 14px; }
-    header h1 { font-size:15px; }
-    #clear-btn, #speak-toggle { font-size:11px; padding:5px 8px; }
-    #scroll-btn { bottom:100px; right:14px; }
-    .empty-state h2 { font-size:18px; }
+  #sidebar-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
+    z-index:99; -webkit-tap-highlight-color:transparent; }
+
+  @media(max-width:768px) {
+    :root { --sidebar-w: 78vw; }
+
+    /* Sidebar slides in as overlay — never pushes content */
+    #sidebar { position:fixed; top:0; left:0; z-index:100; height:100%;
+      height:-webkit-fill-available; width:var(--sidebar-w) !important;
+      transform:translateX(0); transition:transform .25s ease;
+      box-shadow:4px 0 24px rgba(0,0,0,.5); }
+    #sidebar.hidden { transform:translateX(-105%); margin-left:0 !important; }
+
+    /* Show overlay when sidebar open */
+    #sidebar-overlay { display:block; }
+
+    /* Main app always takes full width */
+    .app { width:100% !important; flex:1; }
+
+    header { padding:10px 12px; }
+    header h1 { font-size:14px; }
+    #sidebar-toggle { width:34px; height:34px; font-size:14px; }
+    #clear-btn { font-size:11px; padding:5px 8px; }
+    #speak-toggle { font-size:11px; padding:5px 8px; }
+
+    #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
+    #messages { padding:14px 10px; gap:12px; max-width:100%; }
+    .msg { max-width:90%; font-size:14px; padding:10px 12px; }
+
+    .input-area { padding:8px 10px max(10px,env(safe-area-inset-bottom)); }
+    .input-row { padding:6px 8px; }
+    textarea { font-size:16px; } /* 16px prevents iOS zoom */
+    .tool-btn { width:34px; height:34px; font-size:17px; }
+    #send-btn { width:34px; height:34px; font-size:16px; }
+
+    .empty-state h2 { font-size:19px; }
+    .empty-state p { font-size:13px; }
+    #scroll-btn { bottom:80px; right:12px; width:34px; height:34px; }
+
+    #new-chat-btn { margin:10px; padding:10px 12px; font-size:13.5px; }
+    .conv-item { padding:10px 8px; font-size:13px; min-height:44px; }
+    .conv-item .del-btn { opacity:1; }
+    #sidebar-footer { font-size:11px; padding:10px 12px; }
+  }
+
+  @media(max-width:380px) {
+    :root { --sidebar-w: 88vw; }
+    .msg { font-size:13.5px; }
+    header h1 { font-size:13px; }
+    #speak-toggle { display:none; }
   }
 </style>
 </head>
 <body>
 <div class="layout">
+  <div id="sidebar-overlay" style="display:none;position:fixed;inset:0;background:#0007;z-index:99" id="sidebar-overlay"></div>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
     <div id="sidebar-footer">Aarav AI &middot; by Aarav Singh</div>
   </div>
-  <div id="sidebar-overlay"></div>
   <div class="app">
     <header>
       <div class="left">
@@ -436,7 +463,6 @@ PAGE = """<!DOCTYPE html>
         <h1>Aarav AI</h1>
       </div>
       <button id="clear-btn">Delete chat</button>
-      <button id="speak-toggle" title="Toggle voice responses" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer;flex-shrink:0;">🔇 Voice off</button>
     </header>
 
     <div id="messages-wrap">
@@ -522,19 +548,10 @@ const scrollBtn    = document.getElementById('scroll-btn');
 const speakingIndicator = document.getElementById('speaking-indicator');
 const stopSpeakBtn = document.getElementById('stop-speak-btn');
 
-const speakToggleBtn = document.getElementById('speak-toggle');
 let activeConvId = null;
 let pendingFile  = null;
 let recognition  = null;
 let currentUtterance = null;
-let voiceEnabled = false; // OFF by default — user clicks to enable
-
-speakToggleBtn.addEventListener('click', () => {
-  voiceEnabled = !voiceEnabled;
-  speakToggleBtn.textContent = voiceEnabled ? '🔊 Voice on' : '🔇 Voice off';
-  speakToggleBtn.style.color = voiceEnabled ? 'var(--accent)' : 'var(--muted)';
-  if (!voiceEnabled) { window.speechSynthesis && window.speechSynthesis.cancel(); speakingIndicator.classList.remove('show'); }
-});
 
 // --- Scroll button ---
 messagesWrap.addEventListener('scroll', () => {
@@ -612,21 +629,13 @@ function hideTyping() {
 }
 
 // --- Text-to-speech ---
-function isHindi(text) {
-  return /[\u0900-\u097F]/.test(text);
-}
 function speak(text) {
-  if (!voiceEnabled || !window.speechSynthesis) return;
+  if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const plain = text.replace(/[#*`_~>]/g, '').trim();
   if (!plain) return;
   currentUtterance = new SpeechSynthesisUtterance(plain);
-  currentUtterance.rate = 1.0;
-  currentUtterance.lang = isHindi(plain) ? 'hi-IN' : 'en-US';
-  // Try to pick a matching voice
-  const voices = window.speechSynthesis.getVoices();
-  const langVoice = voices.find(v => v.lang.startsWith(currentUtterance.lang));
-  if (langVoice) currentUtterance.voice = langVoice;
+  currentUtterance.rate = 1.05;
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
@@ -644,7 +653,7 @@ function setupVoice() {
   recognition = new SR();
   recognition.continuous = false;
   recognition.interimResults = true;
-  recognition.lang = 'hi-IN'; // supports both Hindi and English on most browsers
+  recognition.lang = 'en-US';
   let finalTranscript = '';
   recognition.onstart  = () => { voiceBtn.classList.add('active', 'listening'); finalTranscript = ''; };
   recognition.onresult = (e) => {
@@ -692,24 +701,7 @@ pendingRemove.addEventListener('click', () => {
   pendingAttach.classList.remove('show');
 });
 
-// --- News detection ---
-const NEWS_KEYWORDS = /\b(news|khabar|khabren|headlines|aaj ki|today.*news|latest.*news|cricket|score|match|weather|mausam|breaking)\b/i;
-
-async function fetchNewsContext(text) {
-  try {
-    const r = await fetch('/api/news', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text.length < 60 ? text : null })
-    });
-    const d = await r.json();
-    if (d.articles && d.articles.length > 0) {
-      return "Here are the latest news headlines:\n" +
-        d.articles.map((a, i) => `${i+1}. ${a.title} (${a.source})`).join('\n');
-    }
-  } catch {}
-  return null;
-}
+// --- Image generation detection ---
 const IMAGE_KEYWORDS = /\b(generate|create|draw|make|paint|render|show me|ghibli|anime|realistic|cartoon|portrait|landscape|art|artwork|image of|picture of|photo of|illustration)\b/i;
 async function tryGenerateImage(prompt) {
   try {
@@ -781,12 +773,6 @@ async function sendMessage(text) {
   showTyping();
   sendBtn.disabled = true;
 
-  // Check if user wants news — fetch real headlines and inject as context
-  let newsContext = null;
-  if (NEWS_KEYWORDS.test(text)) {
-    newsContext = await fetchNewsContext(text);
-  }
-
   // Check if user wants an image
   const wantsImage = IMAGE_KEYWORDS.test(text) && !attachment;
 
@@ -802,12 +788,7 @@ async function sendMessage(text) {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: text,
-        conversation_id: activeConvId,
-        attachment,
-        news_context: newsContext
-      })
+      body: JSON.stringify({ message: text, conversation_id: activeConvId, attachment })
     });
     if (!r.ok || !r.body) {
       hideTyping();
@@ -861,25 +842,38 @@ input.addEventListener('input', () => {
   input.style.height = Math.min(input.scrollHeight, 140) + 'px';
 });
 
-const overlay = document.getElementById('sidebar-overlay');
-sidebarToggle.addEventListener('click', () => {
-  sidebar.classList.toggle('hidden');
-  const isMobile = window.innerWidth <= 640;
-  if (isMobile) overlay.classList.toggle('show', !sidebar.classList.contains('hidden'));
-});
-overlay.addEventListener('click', () => {
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+
+function isMobile() { return window.innerWidth <= 768; }
+
+function openSidebar() {
+  sidebar.classList.remove('hidden');
+  if (isMobile()) sidebarOverlay.style.display = 'block';
+}
+function closeSidebar() {
   sidebar.classList.add('hidden');
-  overlay.classList.remove('show');
+  sidebarOverlay.style.display = 'none';
+}
+sidebarToggle.addEventListener('click', () => {
+  sidebar.classList.contains('hidden') ? openSidebar() : closeSidebar();
 });
+sidebarOverlay.addEventListener('click', closeSidebar);
+
+// Auto-close sidebar on mobile after picking a conversation
+const _origOpen = openConversation;
+async function openConversation(id) {
+  await _origOpen(id);
+  if (isMobile()) closeSidebar();
+}
+
+// Hide sidebar by default on mobile
+if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
 clearBtn.addEventListener('click', async () => {
   if (!activeConvId) return;
   await fetch('/api/conversations/' + activeConvId, { method: 'DELETE' });
   startNewChat();
 });
-
-// Hide sidebar by default on mobile
-if (window.innerWidth <= 640) sidebar.classList.add('hidden');
 
 // Initial load
 (async () => {
@@ -895,7 +889,7 @@ if (window.innerWidth <= 640) sidebar.classList.add('hidden');
 @app.route("/")
 @login_required
 def index():
-    return Response(PAGE, mimetype="text/html")
+    return Response(PAGE, mimetype="text/html; charset=utf-8")
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -1048,14 +1042,18 @@ def openrouter_stream_chunks(messages):
                     break
                 try:
                     obj = json.loads(data_str)
-                    content = obj["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
+                    content_chunk = obj["choices"][0]["delta"].get("content", "")
+                    if content_chunk:
+                        yield content_chunk
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
             return
-    except requests.RequestException:
-        pass
+        else:
+            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
+            return
+    except requests.RequestException as e:
+        yield f"[OpenRouter connection error: {e}]"
+        return
 
 
 def huggingface_stream_chunks(messages):
@@ -1079,15 +1077,53 @@ def huggingface_stream_chunks(messages):
                     break
                 try:
                     obj = json.loads(data_str)
-                    content = obj["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
+                    content_chunk = obj["choices"][0]["delta"].get("content", "")
+                    if content_chunk:
+                        yield content_chunk
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
             return
-    except requests.RequestException:
-        pass
+        else:
+            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
+            return
+    except requests.RequestException as e:
+        yield f"[OpenRouter connection error: {e}]"
+        return
 
+
+
+def cerebras_stream_chunks(messages):
+    """Stream from Cerebras AI (very fast, generous free tier, works on servers)."""
+    if not CEREBRAS_API_KEY:
+        return
+    try:
+        resp = requests.post(
+            "https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
+            json={"model": CEREBRAS_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data_str)
+                    chunk = obj["choices"][0]["delta"].get("content", "")
+                    if chunk:
+                        yield chunk
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+            return
+        else:
+            yield f"[Cerebras error {resp.status_code}: {resp.text[:300]}]"
+            return
+    except requests.RequestException as e:
+        yield f"[Cerebras connection error: {e}]"
+        return
 
 
 # --- Round-robin provider rotation ------------------------------------------
@@ -1106,14 +1142,16 @@ def auto_stream_chunks(gemini_payload, gemini_messages):
 
     # Build the full list of available providers (only those with keys)
     all_providers = []
-    if PROVIDER == "gemini" and GEMINI_API_KEY:
-        # Gemini only when explicitly requested — free tier fails on servers
+    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
         all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
-    if PROVIDER in ("auto", "openrouter") and OPENROUTER_API_KEY:
+    if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
+        all_providers.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
+    if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
         all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
-    if PROVIDER in ("auto", "huggingface") and HF_API_KEY:
+    if PROVIDER == "huggingface" and HF_API_KEY:
+        # HuggingFace free tier blocks server IPs (Render etc) — only use if explicitly set
         all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
     if PROVIDER == "ollama":
         all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
@@ -1190,9 +1228,8 @@ def gemini_stream_chunks(payload):
 def chat():
     data = request.get_json(force=True) or {}
     user_message = (data.get("message") or "").strip()
-    conv_id      = data.get("conversation_id")
-    attachment   = data.get("attachment")
-    news_context = (data.get("news_context") or "").strip()
+    conv_id = data.get("conversation_id")
+    attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
 
     if not user_message and not attachment:
         return jsonify({"error": "message or attachment is required"}), 400
@@ -1214,11 +1251,7 @@ def chat():
     messages = conv.setdefault("messages", [])
 
     user_parts = []
-    # If news context was fetched, prepend it so the AI can use it
-    if news_context:
-        combined = f"{news_context}\n\nUser question: {user_message}"
-        user_parts.append({"text": combined})
-    elif user_message:
+    if user_message:
         user_parts.append({"text": user_message})
     attachment_meta = None
     if attachment:
@@ -1257,47 +1290,13 @@ def chat():
         messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
         save_conversation(username, conv_id, conv)
 
-    resp = Response(stream_with_context(generate()), mimetype="text/plain")
+    resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
     resp.headers["X-Conversation-Id"] = conv_id
     return resp
 
 
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "344a953f2d08489a865239c2f9f030e4")
-
-
-def fetch_news(query=None, category=None, country="in"):
-    """Fetch top headlines from NewsAPI."""
-    if not NEWS_API_KEY:
-        return None
-    params = {"apiKey": NEWS_API_KEY, "country": country, "pageSize": 8}
-    if query:
-        params["q"] = query
-    if category:
-        params["category"] = category
-    try:
-        r = requests.get("https://newsapi.org/v2/top-headlines", params=params, timeout=8)
-        if r.status_code == 200:
-            articles = r.json().get("articles", [])
-            return [{"title": a["title"], "source": a["source"]["name"],
-                     "url": a["url"], "publishedAt": a["publishedAt"]} for a in articles if a.get("title")]
-    except Exception:
-        pass
-    return None
-
-
-@app.route("/api/news", methods=["POST"])
-@login_required
-def get_news():
-    data = request.get_json(force=True) or {}
-    query    = data.get("query")
-    category = data.get("category")
-    articles = fetch_news(query=query, category=category)
-    if articles is None:
-        return jsonify({"error": "News not available"}), 503
-    return jsonify({"articles": articles})
-
-
-
+@app.route("/api/generate-image", methods=["POST"])
+@app.route("/api/generate-image", methods=["POST"])
 @login_required
 def generate_image():
     data = request.get_json(force=True) or {}
@@ -1330,6 +1329,8 @@ if __name__ == "__main__":
         active.append(f"Gemini({GEMINI_MODEL})")
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         active.append(f"Groq({GROQ_MODEL})")
+    if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
+        active.append(f"Cerebras({CEREBRAS_MODEL})")
     if PROVIDER in ("auto", "openrouter") and OPENROUTER_API_KEY:
         active.append(f"OpenRouter({OPENROUTER_MODEL})")
     if PROVIDER in ("auto", "huggingface") and HF_API_KEY:
