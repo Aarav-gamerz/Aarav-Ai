@@ -315,10 +315,39 @@ PAGE = """<!DOCTYPE html>
     display:flex; align-items:center; justify-content:space-between; gap:10px;
     background:var(--bg); }
   header .left { display:flex; align-items:center; gap:10px; min-width:0; }
+  header .right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
   #sidebar-toggle { background:none; border:1px solid var(--border); color:var(--muted);
     width:32px; height:32px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0; }
   #sidebar-toggle:hover { background:var(--panel); }
   header h1 { font-size:16px; font-weight:700; color:var(--accent); margin:0; }
+  #fullscreen-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:32px; height:32px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; }
+  #fullscreen-btn:hover { background:var(--panel); }
+  #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
+  #name-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:32px; height:32px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; }
+  #name-btn:hover { background:var(--panel); }
+
+  /* Name modal */
+  #name-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
+    z-index:200; align-items:center; justify-content:center; }
+  #name-modal-overlay.show { display:flex; }
+  #name-modal { background:var(--bg); border:1px solid var(--border); border-radius:14px;
+    padding:22px; width:90%; max-width:360px; box-shadow:0 10px 40px rgba(0,0,0,.3); }
+  #name-modal h3 { margin:0 0 6px; font-size:16px; color:var(--text); }
+  #name-modal p { margin:0 0 14px; font-size:12.5px; color:var(--muted); }
+  #name-input { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:8px;
+    border:1.5px solid var(--border); background:var(--panel); color:var(--text);
+    font-size:14.5px; outline:none; }
+  #name-input:focus { border-color:var(--accent); }
+  #name-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
+  #name-modal-actions button { padding:8px 14px; border-radius:8px; font-size:13px;
+    cursor:pointer; border:1px solid var(--border); background:none; color:var(--text); }
+  #name-cancel-btn:hover { background:var(--panel); }
+  #name-save-btn { background:var(--accent); color:#fff; border-color:var(--accent); }
+  #name-save-btn:hover { opacity:.9; }
   #clear-btn { background:none; border:1px solid var(--border); color:var(--muted);
     font-size:12px; padding:6px 12px; border-radius:6px; cursor:pointer; flex-shrink:0; }
   #clear-btn:hover { background:var(--panel); }
@@ -417,6 +446,8 @@ PAGE = """<!DOCTYPE html>
     header { padding:10px 12px; }
     header h1 { font-size:14px; }
     #sidebar-toggle { width:34px; height:34px; font-size:14px; }
+    #fullscreen-btn { width:34px; height:34px; font-size:14px; }
+    #name-btn { width:34px; height:34px; font-size:14px; }
     #clear-btn { font-size:11px; padding:5px 8px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
 
@@ -462,7 +493,11 @@ PAGE = """<!DOCTYPE html>
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Aarav AI</h1>
       </div>
-      <button id="clear-btn">Delete chat</button>
+      <div class="right">
+        <button id="name-btn" title="What should Aarav AI call you?">🙂</button>
+        <button id="fullscreen-btn" title="Toggle fullscreen">⛶</button>
+        <button id="clear-btn">Delete chat</button>
+      </div>
     </header>
 
     <div id="messages-wrap">
@@ -525,6 +560,18 @@ PAGE = """<!DOCTYPE html>
   </div>
 </div>
 
+<div id="name-modal-overlay">
+  <div id="name-modal">
+    <h3>What should Aarav AI call you?</h3>
+    <p>Enter your preferred name — Aarav AI will use it when it talks to you.</p>
+    <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
+    <div id="name-modal-actions">
+      <button id="name-cancel-btn" type="button">Cancel</button>
+      <button id="name-save-btn" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
@@ -535,6 +582,12 @@ const clearBtn     = document.getElementById('clear-btn');
 const convListEl   = document.getElementById('conv-list');
 const newChatBtn   = document.getElementById('new-chat-btn');
 const sidebarToggle= document.getElementById('sidebar-toggle');
+const fullscreenBtn= document.getElementById('fullscreen-btn');
+const nameBtn       = document.getElementById('name-btn');
+const nameModalOverlay = document.getElementById('name-modal-overlay');
+const nameInput     = document.getElementById('name-input');
+const nameCancelBtn = document.getElementById('name-cancel-btn');
+const nameSaveBtn   = document.getElementById('name-save-btn');
 const sidebar      = document.getElementById('sidebar');
 const fileInput    = document.getElementById('file-input');
 const attachBtn    = document.getElementById('attach-btn');
@@ -788,7 +841,7 @@ async function sendMessage(text) {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, conversation_id: activeConvId, attachment })
+      body: JSON.stringify({ message: text, conversation_id: activeConvId, attachment, user_name: getUserName() })
     });
     if (!r.ok || !r.body) {
       hideTyping();
@@ -858,6 +911,68 @@ sidebarToggle.addEventListener('click', () => {
   sidebar.classList.contains('hidden') ? openSidebar() : closeSidebar();
 });
 sidebarOverlay.addEventListener('click', closeSidebar);
+
+// Fullscreen toggle (works on mobile Chrome/Safari/Android + desktop)
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+function updateFullscreenBtn() {
+  if (isFullscreen()) {
+    fullscreenBtn.textContent = '⤢';
+    fullscreenBtn.classList.add('active');
+    fullscreenBtn.title = 'Exit fullscreen';
+  } else {
+    fullscreenBtn.textContent = '⛶';
+    fullscreenBtn.classList.remove('active');
+    fullscreenBtn.title = 'Enter fullscreen';
+  }
+}
+async function toggleFullscreen() {
+  const el = document.documentElement;
+  try {
+    if (!isFullscreen()) {
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen(); // iOS Safari (limited support)
+    } else {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  } catch (err) {
+    console.warn('Fullscreen request failed:', err);
+  }
+}
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+document.addEventListener('fullscreenchange', updateFullscreenBtn);
+document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
+
+// "What should Aarav AI call you?" — stored locally, sent with every chat request
+function getUserName() { return localStorage.getItem('aarav_user_name') || ''; }
+function setUserName(name) {
+  if (name) localStorage.setItem('aarav_user_name', name);
+  else localStorage.removeItem('aarav_user_name');
+}
+function openNameModal() {
+  nameInput.value = getUserName();
+  nameModalOverlay.classList.add('show');
+  setTimeout(() => nameInput.focus(), 50);
+}
+function closeNameModal() { nameModalOverlay.classList.remove('show'); }
+nameBtn.addEventListener('click', openNameModal);
+nameCancelBtn.addEventListener('click', closeNameModal);
+nameModalOverlay.addEventListener('click', (e) => { if (e.target === nameModalOverlay) closeNameModal(); });
+nameSaveBtn.addEventListener('click', () => {
+  setUserName(nameInput.value.trim());
+  closeNameModal();
+});
+nameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); nameSaveBtn.click(); }
+  else if (e.key === 'Escape') closeNameModal();
+});
+// First-time visitors get a gentle one-time prompt
+if (!localStorage.getItem('aarav_name_prompted')) {
+  localStorage.setItem('aarav_name_prompted', '1');
+  setTimeout(openNameModal, 600);
+}
 
 // Auto-close sidebar on mobile after picking a conversation
 const _origOpen = openConversation;
@@ -1132,13 +1247,14 @@ def cerebras_stream_chunks(messages):
 _provider_index = [0]
 
 
-def auto_stream_chunks(gemini_payload, gemini_messages):
+def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
     """True round-robin rotation across all configured providers.
     No provider is primary — starts from wherever the last successful call left off.
     If the current provider fails/is rate-limited, moves to the next one and
     remembers that position for the next request too."""
-    openai_msgs = to_openai_messages(gemini_messages, SYSTEM_PROMPT)
-    ollama_msgs = to_ollama_messages(gemini_messages, SYSTEM_PROMPT)
+    sp = system_prompt or SYSTEM_PROMPT
+    openai_msgs = to_openai_messages(gemini_messages, sp)
+    ollama_msgs = to_ollama_messages(gemini_messages, sp)
 
     # Build the full list of available providers (only those with keys)
     all_providers = []
@@ -1230,6 +1346,7 @@ def chat():
     user_message = (data.get("message") or "").strip()
     conv_id = data.get("conversation_id")
     attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
+    user_name = (data.get("user_name") or "").strip()[:60]  # what Aarav AI should call the user
 
     if not user_message and not attachment:
         return jsonify({"error": "message or attachment is required"}), 400
@@ -1271,18 +1388,26 @@ def chat():
         {"role": m["role"], "parts": m["parts"]} for m in messages
     ]
 
+    effective_system_prompt = SYSTEM_PROMPT
+    if user_name:
+        effective_system_prompt += (
+            f" The user has told you their preferred name is \"{user_name}\". "
+            f"Address them as {user_name} naturally where it fits (e.g. greetings, "
+            f"acknowledgements) — don't force it into every single reply."
+        )
+
     payload = {
         "contents": gemini_contents,
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": effective_system_prompt}]},
         "tools": [{"google_search": {}}],
     }
 
     def generate():
         full_reply = []
         if PROVIDER == "ollama":
-            chunk_source = ollama_stream_chunks(to_ollama_messages(messages, SYSTEM_PROMPT))
+            chunk_source = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
         else:
-            chunk_source = auto_stream_chunks(payload, messages)
+            chunk_source = auto_stream_chunks(payload, messages, effective_system_prompt)
 
         for chunk in chunk_source:
             full_reply.append(chunk)
