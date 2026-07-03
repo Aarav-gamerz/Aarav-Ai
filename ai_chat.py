@@ -286,7 +286,7 @@ def make_title(first_message):
 
 # --- HTML pages ----------------------------------------------------------
 
-PAGE = """<!DOCTYPE html>
+PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
