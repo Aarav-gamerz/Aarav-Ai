@@ -1230,6 +1230,21 @@ if(isMobile()) sidebar.classList.add('hidden');
 </html>
 """
 
+VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
+
+@app.route("/api/vip-unlock", methods=["POST"])
+def vip_unlock():
+    data = request.get_json(force=True) or {}
+    if data.get("password") == VIP_PASSWORD:
+        session["vip"] = True
+        session.permanent = True
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": "Wrong password"}), 403
+
+@app.route("/api/vip-status", methods=["GET"])
+def vip_status():
+    return jsonify({"vip": bool(session.get("vip"))})
+
 @app.route("/")
 @login_required
 def index():
@@ -1717,10 +1732,10 @@ def chat():
     # Map the frontend Aarav model name → provider + real model string
     AARAV_MAP = {
         "aarav-1.0":    ("groq",      "llama-3.1-8b-instant"),
-        "aarav-2.0":    ("groq",      "llama-3.3-70b-versatile"),
-        "aarav-2.5":    ("cerebras",  "llama-3.3-70b"),
-        "aarav-3.5":    ("cerebras",  "llama-4-scout-17b-16e-instruct"),
-        "aarav-ultra":  ("cerebras",  "qwen-3-32b"),
+        "aarav-2.0":    ("groq",      "llama3-70b-8192"),
+        "aarav-2.5":    ("groq",      "llama-3.3-70b-versatile"),
+        "aarav-3.5":    ("cerebras",  "llama3.1-70b"),
+        "aarav-ultra":  ("cerebras",  "llama3.1-405b"),
     }
     aarav_id = (data.get("model") or "aarav-2.5").strip()
 
@@ -1728,7 +1743,7 @@ def chat():
     if aarav_id == "aarav-ultra" and not session.get("vip"):
         return jsonify({"error": "vip_required"}), 403
 
-    provider, model_name = AARAV_MAP.get(aarav_id, ("groq", "llama-3.1-8b-instant"))
+    provider, model_name = AARAV_MAP.get(aarav_id, ("groq", "llama-3.3-70b-versatile"))
 
     def generate():
         full_reply = []
@@ -1746,7 +1761,19 @@ def chat():
         for chunk in chunk_source:
             full_reply.append(chunk)
             yield chunk
-        messages.append({"role": "model", "parts": [{"text": "".join(full_reply)}]})
+
+        # If primary provider returned an error message, fallback to Groq 1.0
+        reply_text = "".join(full_reply)
+        if reply_text.startswith("[") and "error" in reply_text.lower() and provider != "groq":
+            full_reply = []
+            yield "\n\n"
+            fallback = groq_stream_chunks_with_model(openai_msgs, "llama-3.1-8b-instant")
+            for chunk in fallback:
+                full_reply.append(chunk)
+                yield chunk
+            reply_text = "".join(full_reply)
+
+        messages.append({"role": "model", "parts": [{"text": reply_text}]})
         save_conversation(username, conv_id, conv)
 
     resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
