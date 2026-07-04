@@ -1,5 +1,5 @@
 """
-Aarav AI — single file, powered by Google's Gemini API or a local Ollama model.
+Mythic AI — single file, powered by Google's Gemini API or a local Ollama model.
 
 Usage (Gemini — default, needs a free API key):
     1. pip install flask requests
@@ -287,7 +287,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Aarav AI</title>
+<title>Mythic AI</title>
 <style>
   :root {
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
@@ -539,19 +539,19 @@ PAGE = r"""<!DOCTYPE html>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
-    <div id="sidebar-footer">Aarav AI &middot; by Aarav Singh</div>
+    <div id="sidebar-footer">Mythic AI &middot; by Aarav Singh</div>
   </div>
   <div class="app">
     <header>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
-        <h1>Aarav AI</h1>
+        <h1>Mythic AI</h1>
       </div>
       <div class="right">
         <button id="fullscreen-btn" type="button" title="Fullscreen">
           <span id="fullscreen-icon">⛶</span>
         </button>
-        <button id="name-btn" title="What should Aarav AI call you?">🙂</button>
+        <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
         <button id="export-btn" title="Export this chat">⬇</button>
         <button id="clear-btn" title="Delete this chat">🗑</button>
       </div>
@@ -560,7 +560,7 @@ PAGE = r"""<!DOCTYPE html>
     <div id="messages-wrap">
       <div id="messages">
         <div class="empty-state" id="empty-state">
-          <h2>Aarav AI</h2>
+          <h2>Mythic AI</h2>
           <p>Ask me anything, generate images, or just chat 👋</p>
         </div>
       </div>
@@ -596,7 +596,8 @@ PAGE = r"""<!DOCTYPE html>
               <circle cx="12" cy="13" r="4"/>
             </svg>
           </button>
-          <textarea id="input" rows="1" placeholder="Message Aarav AI..."></textarea>
+          <textarea id="input" rows="1" placeholder="Message Mythic Ai
+          ..."></textarea>
           <!-- Voice input -->
           <button class="tool-btn" id="voice-btn" type="button" title="Voice input">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -619,8 +620,8 @@ PAGE = r"""<!DOCTYPE html>
 
 <div id="name-modal-overlay">
   <div id="name-modal">
-    <h3>What should Aarav AI call you?</h3>
-    <p>Enter your preferred name — Aarav AI will use it when it talks to you.</p>
+    <h3>What should Mythic AI call you?</h3>
+    <p>Enter your preferred name — Mythic AI will use it when it talks to you.</p>
     <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
     <div id="name-modal-actions">
       <button id="name-cancel-btn" type="button">Cancel</button>
@@ -683,7 +684,7 @@ function clearEmptyState() {
   if (es) es.remove();
 }
 function showEmptyState() {
-  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Aarav AI</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
+  messagesEl.innerHTML = '<div class="empty-state" id="empty-state"><h2>Mythic AI</h2><p>Ask me anything, generate images, or just chat 👋</p></div>';
 }
 
 function addMessage(role, text, attachment) {
@@ -1139,7 +1140,7 @@ fullscreenBtn.addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
-// "What should Aarav AI call you?" — stored locally, sent with every chat request
+// "What should Mythic AI call you?" — stored locally, sent with every chat request
 function getUserName() { return localStorage.getItem('aarav_user_name') || ''; }
 function setUserName(name) {
   if (name) localStorage.setItem('aarav_user_name', name);
@@ -1183,9 +1184,9 @@ exportBtn.addEventListener('click', async () => {
     const r = await fetch('/api/conversations/' + activeConvId);
     if (!r.ok) return;
     const d = await r.json();
-    const lines = [`# ${d.title || 'Aarav AI chat'}`, ''];
+    const lines = [`# ${d.title || 'Mythic AI chat'}`, ''];
     (d.messages || []).forEach(m => {
-      lines.push(m.role === 'user' ? 'You:' : 'Aarav AI:');
+      lines.push(m.role === 'user' ? 'You:' : 'Mythic AI:');
       lines.push(m.text || (m.attachment ? `[attachment: ${m.attachment.name}]` : ''));
       lines.push('');
     });
@@ -1409,7 +1410,7 @@ def openrouter_stream_chunks(messages):
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json",
-                     "HTTP-Referer": "http://localhost:5000", "X-Title": "Aarav AI"},
+                     "HTTP-Referer": "http://localhost:5000", "X-Title": "Mythic AI"},
             json={"model": OPENROUTER_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
             stream=True, timeout=60,
         )
@@ -1612,7 +1613,7 @@ def chat():
     news_context = (data.get("news_context") or "").strip()
     conv_id = data.get("conversation_id")
     attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
-    user_name = (data.get("user_name") or "").strip()[:60]  # what Aarav AI should call the user
+    user_name = (data.get("user_name") or "").strip()[:60]  # what Mythic AI should call the user
     regenerate = bool(data.get("regenerate"))
 
     if regenerate:
@@ -1748,6 +1749,6 @@ if __name__ == "__main__":
     if PROVIDER == "ollama":
         active.append(f"Ollama({OLLAMA_MODEL}@{OLLAMA_URL})")
     providers_str = " → ".join(active) if active else "none configured!"
-    print(f"Starting Aarav AI at http://localhost:5000")
+    print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (fallback order): {providers_str}")
     app.run(host="0.0.0.0", port=5000, debug=False)
