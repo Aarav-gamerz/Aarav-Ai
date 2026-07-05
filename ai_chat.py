@@ -2036,32 +2036,6 @@ def chat():
     return resp
 
 
-@app.route("/api/generate-image", methods=["POST"])
-@login_required
-def generate_image():
-    data = request.get_json(force=True) or {}
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-    if not HF_API_KEY:
-        return jsonify({"error": "No HuggingFace key configured"}), 503
-    # Use FLUX.1-schnell — fast, high quality, free on HF
-    model = "black-forest-labs/FLUX.1-schnell"
-    try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
-            headers={"Authorization": f"Bearer {HF_API_KEY}"},
-            json={"inputs": prompt},
-            timeout=60,
-        )
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            img_b64 = base64.b64encode(resp.content).decode("utf-8")
-            return jsonify({"image": img_b64})
-        else:
-            return jsonify({"error": f"Image generation failed ({resp.status_code})"}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": str(e)}), 502
-
 
 if __name__ == "__main__":
     active = []
