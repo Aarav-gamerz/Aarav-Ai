@@ -56,7 +56,7 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # --- API Keys (hardcoded fallbacks — override via environment variables) ------
 # WARNING: don't commit a file with real keys to a public GitHub repo.
 # Set these as environment variables on Render instead.
-GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
+GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "csk-2ph5f5nxt3jrtwj5edcehpr5xh96628268fvjh4e658m4t6h")
 OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","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")
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "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")
@@ -67,7 +67,7 @@ GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
 OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
-CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
+CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "llama-3.3-70b")
 OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
 
@@ -86,11 +86,11 @@ VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
 VIP_MODELS   = {"aarav-ultra"}
 
 AARAV_MAP = {
-    "aarav-1.0":   ("groq",     "llama-3.1-8b-instant"),
-    "aarav-2.0":   ("groq",     "llama-3.3-70b-versatile"),
-    "aarav-2.5":   ("cerebras", "llama3.1-8b"),
-    "aarav-3.5":   ("cerebras", "llama-3.3-70b"),
-    "aarav-ultra": ("groq",     "llama-3.3-70b-versatile"),
+    "aarav-1.0":   ("cerebras", "llama3.1-8b"),
+    "aarav-2.0":   ("cerebras", "llama-3.3-70b"),
+    "aarav-2.5":   ("cerebras", "llama-4-scout-17b-16e-instruct"),
+    "aarav-3.5":   ("cerebras", "llama-4-scout-17b-16e-instruct"),
+    "aarav-ultra": ("cerebras", "llama-3.3-70b"),
 }
 DEFAULT_MODEL = "aarav-2.5"
 MODEL_INFO = [
@@ -2109,10 +2109,10 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
     all_providers = []
     if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
         all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
-    if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
-        all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         all_providers.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
+    if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
+        all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
     if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
         all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
     if PROVIDER == "huggingface" and HF_API_KEY:
