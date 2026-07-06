@@ -40,7 +40,6 @@ import uuid
 import time
 import base64
 import requests
-from datetime import datetime, timezone
 from flask import (
     Flask, request, jsonify, Response, session,
     stream_with_context
@@ -54,22 +53,21 @@ PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
 # "huggingface" = Hugging Face only
 # "ollama"      = local Ollama only
 
-# --- API Keys ------------------------------------------------------------
-# WARNING: never commit a file with real keys to a public GitHub repo, and
-# never hardcode them as defaults here — set them as environment variables
-# on Render (or wherever you deploy) instead.
-GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
-CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","")
-HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
+# --- API Keys (hardcoded fallbacks — override via environment variables) ------
+# WARNING: don't commit a file with real keys to a public GitHub repo.
+# Set these as environment variables on Render instead.
 GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "")
+GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "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")
+CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "csk-2ph5f5nxt3jrtwj5edcehpr5xh96628268fvjh4e658m4t6h")
+OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","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")
+HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 
 # --- Model names -------------------------------------------------------------
 GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
 OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
-CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "llama-3.3-70b")
+CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
 OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
 OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
 
@@ -80,60 +78,24 @@ GEMINI_STREAM_URL = (
 # keep old name for compatibility with existing references below
 API_KEY = GEMINI_API_KEY
 MODEL   = GEMINI_MODEL
-NEWS_API_KEY    = os.environ.get("NEWS_API_KEY",    "")
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
-
-# --- VIP & Model config ------------------------------------------------------
-VIP_PASSWORD = os.environ.get("VIP_PASSWORD", "1254")
-VIP_MODELS   = {"aarav-ultra"}
-
-# Every tier has a PRIMARY provider/model, but will automatically fall back to
-# the other provider (with that provider's default model) if the primary one
-# fails — so one bad key/model name doesn't take every tier down with it.
-AARAV_MAP = {
-    "aarav-1.0":   ("groq",     "llama-3.1-8b-instant"),
-    "aarav-2.0":   ("groq",     "llama-3.3-70b-versatile"),
-    "aarav-2.5":   ("groq",     "llama-3.3-70b-versatile"),
-    "aarav-3.5":   ("cerebras", "llama3.1-70b"),
-    "aarav-ultra": ("cerebras", "llama-3.3-70b"),
-}
-DEFAULT_MODEL = "aarav-2.5"
-MODEL_INFO = [
-    {"id": "aarav-1.0",   "name": "Mythic 1.0",   "desc": "Fast — quick answers",       "vip": False},
-    {"id": "aarav-2.0",   "name": "Mythic 2.0",   "desc": "Balanced — everyday tasks",  "vip": False},
-    {"id": "aarav-2.5",   "name": "Mythic 2.5",   "desc": "Smart — best for most",      "vip": False},
-    {"id": "aarav-3.5",   "name": "Mythic 3.5",   "desc": "Advanced — complex tasks",   "vip": False},
-    {"id": "aarav-ultra", "name": "Mythic Ultra ✨","desc": "Most powerful — VIP only",  "vip": True},
-]
-
 SYSTEM_PROMPT = (
-    "You are Mythic AI, a smart and friendly AI assistant. "
-    "You were created by Aarav Singh — he is your maker, owner, and developer. "
-    "If asked who made you, who owns you, or who your creator is: say 'I was created by Aarav Singh.' Say it once, naturally. "
-    "Never say you were made by Google, Meta, Groq, Cerebras, Mistral, Anthropic, OpenAI, or any other company. "
-
-    "NEWS: You have access to real-time news. When the system provides news headlines, present them naturally. "
-
-    "WEATHER: When the system provides weather data, present it clearly and naturally. "
-    "Include temperature, condition, humidity, and wind. Make it friendly and useful. "
-
-    "IMAGE GENERATION: When the system shows '[Image generated]', acknowledge the image was created. "
-
-    "HOMEWORK HELP: When the user asks for homework help, be a patient teacher. "
-    "Explain step by step. Use simple language. Give examples. "
-    "For math: show working. For essays: give structure and tips. For science: explain concepts clearly. "
-    "Hindi mein bhi samjha sakte ho agar user Hindi mein pooche. "
-
-    "LANGUAGE: Detect the language of EACH user message carefully. Reply in EXACTLY that language. "
-    "English message → Pure English reply only. "
-    "Hindi message (Devanagari script like नमस्ते) → Pure Hindi reply in Devanagari script only. "
-    "Hinglish message (Roman Hindi like 'kya haal hai') → Hinglish reply only. "
-    "NEVER mix languages. NEVER add (Translation: ...) in brackets. NEVER switch language mid-reply. "
-    "When replying in Hindi, use proper Devanagari Unicode — never romanized Hindi unless user wrote Hinglish. "
-
-    "BEHAVIOR: Never repeat yourself. No filler like 'Great question' or 'Sure, of course!'. "
-    "Be direct, concise, helpful — like a knowledgeable friend. "
-    "For code, always use markdown code blocks."
+    "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
+    "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
+    "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
+    "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
+    "When writing code, always wrap it in markdown code blocks with the language name. "
+    "LANGUAGE RULES — follow these strictly every single reply: "
+    "If the user writes in ENGLISH → reply in English only, no Hindi, no Devanagari, no mixing. "
+    "If the user writes in HINDI (Devanagari script like नमस्ते) → reply in Hindi only. "
+    "If the user writes in HINGLISH (Roman Hindi like 'kya haal hai') → reply in Hinglish only. "
+    "NEVER mix languages in one reply. NEVER add translations in brackets. "
+    "DEFAULT to English when unsure. "
+    "ANTI-REPETITION RULES — follow strictly every reply: "
+    "1. NEVER restate or echo back what the user just said. Jump straight to the answer. "
+    "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
+    "3. NEVER repeat information already given earlier in the conversation. Build on it. "
+    "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
+    "5. Keep answers concise unless the user asks for detail."
 )
 
 # Extra instruction appended ONLY for Gemini, which actually has a real google_search tool wired up.
@@ -156,13 +118,6 @@ MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-if SUPABASE_URL and not SUPABASE_KEY:
-    print("[Supabase] WARNING: SUPABASE_URL is set but SUPABASE_KEY is missing — "
-          "falling back to local file storage, which does NOT persist on Render.")
-if SUPABASE_KEY and not SUPABASE_URL:
-    print("[Supabase] WARNING: SUPABASE_KEY is set but SUPABASE_URL is missing — "
-          "falling back to local file storage, which does NOT persist on Render.")
-
 def sb_headers():
     return {
         "apikey": SUPABASE_KEY,
@@ -174,16 +129,8 @@ def sb_headers():
 def sb(path):
     return f"{SUPABASE_URL}/rest/v1/{path}"
 
-def _sb_log_error(action, resp=None, exc=None):
-    """Every Supabase failure now prints the real reason to the server logs
-    (visible in Render's Logs tab) instead of failing completely silently."""
-    if exc is not None:
-        print(f"[Supabase] {action} failed: {exc}")
-    elif resp is not None and not (200 <= resp.status_code < 300):
-        print(f"[Supabase] {action} failed: HTTP {resp.status_code} — {resp.text[:500]}")
 
-
-# --- User accounts -----------------------------------------------------------
+# --- User accounts (Supabase: users table) -----------------------------------
 
 def current_username():
     """Each visitor gets a unique anonymous ID stored in their browser cookie.
@@ -206,7 +153,7 @@ def login_required(view):
 # --- Supabase / file storage helpers ----------------------------------------
 
 def list_conversations(username):
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    if not SUPABASE_URL:
         return _list_conversations_file(username)
     try:
         r = requests.get(
@@ -215,14 +162,13 @@ def list_conversations(username):
         )
         if r.status_code == 200:
             return r.json()
-        _sb_log_error("list_conversations", resp=r)
-    except Exception as e:
-        _sb_log_error("list_conversations", exc=e)
+    except Exception:
+        pass
     return []
 
 
 def load_conversation(username, conv_id):
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    if not SUPABASE_URL:
         return _load_conversation_file(username, conv_id)
     try:
         r = requests.get(
@@ -238,21 +184,19 @@ def load_conversation(username, conv_id):
                     "updated_at": row["updated_at"],
                     "messages": row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"]),
                 }
-        else:
-            _sb_log_error("load_conversation", resp=r)
-    except Exception as e:
-        _sb_log_error("load_conversation", exc=e)
+    except Exception:
+        pass
     return None
 
 
 def save_conversation(username, conv_id, data):
     data["updated_at"] = time.time()
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    if not SUPABASE_URL:
         _save_conversation_file(username, conv_id, data)
         return
     try:
         headers = {**sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"}
-        r = requests.post(
+        requests.post(
             sb("conversations"),
             headers=headers,
             json={
@@ -264,27 +208,21 @@ def save_conversation(username, conv_id, data):
             },
             timeout=15,
         )
-        if r.status_code not in (200, 201, 204):
-            _sb_log_error("save_conversation", resp=r)
-            _save_conversation_file(username, conv_id, data)
-    except Exception as e:
-        _sb_log_error("save_conversation", exc=e)
-        _save_conversation_file(username, conv_id, data)
+    except Exception:
+        pass
 
 
 def delete_conversation(username, conv_id):
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    if not SUPABASE_URL:
         _delete_conversation_file(username, conv_id)
         return
     try:
-        r = requests.delete(
+        requests.delete(
             sb(f"conversations?id=eq.{conv_id}&username=eq.{username}"),
             headers=sb_headers(), timeout=10,
         )
-        if r.status_code not in (200, 204):
-            _sb_log_error("delete_conversation", resp=r)
-    except Exception as e:
-        _sb_log_error("delete_conversation", exc=e)
+    except Exception:
+        pass
 
 
 # --- Local file fallbacks for when Supabase is not configured ----------------
@@ -350,9 +288,6 @@ PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mythic AI</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg:#1a1a1a; --panel:#2a2a2a; --border:#3a3a3a;
@@ -362,7 +297,7 @@ PAGE = r"""<!DOCTYPE html>
   }
   * { box-sizing:border-box; margin:0; padding:0; }
   html,body { height:100%; background:var(--bg); color:var(--text);
-    font-family:'Inter','Noto Sans Devanagari',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; overflow:hidden; }
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; overflow:hidden; }
   .layout { display:flex; height:100vh; }
 
   /* Sidebar */
@@ -410,15 +345,16 @@ PAGE = r"""<!DOCTYPE html>
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
 
-  /* Fullscreen toggle — lives in the header so it's reachable with one tap
-     at the top of the screen, alongside the other header icon buttons. */
-  #fullscreen-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
-    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
+  /* Fullscreen bar — sits above the input row so it's always reachable on mobile,
+     away from any notch/status-bar area that can swallow top-corner taps. */
+  #fullscreen-btn { display:flex; align-items:center; justify-content:center; gap:6px;
+    width:100%; max-width:760px; margin:0 auto 8px; padding:9px 12px;
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    color:var(--muted); font-size:13px; cursor:pointer; touch-action:manipulation;
     -webkit-tap-highlight-color:transparent; }
-  #fullscreen-btn:hover { background:var(--panel); color:var(--text); }
+  #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); }
   #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
-  #fullscreen-icon { font-size:16px; line-height:1; }
+  #fullscreen-icon { font-size:15px; }
 
   /* Fallback for browsers without a real Fullscreen API (iOS Safari, some in-app webviews):
      hide the sidebar toggle/header chrome so the chat fills the screen. */
@@ -445,10 +381,8 @@ PAGE = r"""<!DOCTYPE html>
   #name-save-btn { background:var(--accent); color:#fff; border-color:var(--accent); }
   #name-save-btn:hover { opacity:.9; }
   #clear-btn { background:none; border:1px solid var(--border); color:var(--muted);
-    width:36px; height:36px; border-radius:6px; font-size:15px; cursor:pointer; flex-shrink:0;
-    display:flex; align-items:center; justify-content:center; touch-action:manipulation;
-    -webkit-tap-highlight-color:transparent; }
-  #clear-btn:hover { background:var(--panel); color:#ef4444; border-color:#ef4444; }
+    font-size:12px; padding:6px 12px; border-radius:6px; cursor:pointer; flex-shrink:0; }
+  #clear-btn:hover { background:var(--panel); }
 
   /* Messages */
   #messages-wrap { flex:1; overflow-y:auto; position:relative; }
@@ -536,12 +470,6 @@ PAGE = r"""<!DOCTYPE html>
   #speaking-indicator.show { display:flex; }
   #stop-speak-btn { background:none; border:1px solid var(--border); color:var(--muted);
     font-size:11px; padding:2px 8px; border-radius:4px; cursor:pointer; }
-  #quick-actions { display:flex; gap:8px; padding:6px 20px 0;
-    max-width:760px; margin:0 auto; width:100%; flex-wrap:wrap; }
-  .quick-btn { background:var(--panel); border:1px solid var(--border); color:var(--text);
-    font-size:12.5px; padding:6px 14px; border-radius:20px; cursor:pointer;
-    transition:all .15s ease; white-space:nowrap; font-family:inherit; }
-  .quick-btn:hover { background:var(--accent-dim); border-color:var(--accent); color:var(--accent); }
 
   #messages-wrap::-webkit-scrollbar, #conv-list::-webkit-scrollbar { width:6px; }
   #messages-wrap::-webkit-scrollbar-thumb, #conv-list::-webkit-scrollbar-thumb
@@ -570,8 +498,9 @@ PAGE = r"""<!DOCTYPE html>
     #sidebar-toggle { width:38px; height:38px; font-size:14px; }
     #name-btn { width:38px; height:38px; font-size:14px; }
     #export-btn { width:38px; height:38px; font-size:14px; }
-    #fullscreen-btn { width:38px; height:38px; font-size:14px; }
-    #clear-btn { width:38px; height:38px; font-size:14px; }
+    #clear-btn { font-size:11px; padding:8px 10px; min-height:38px; }
+    #speak-toggle { font-size:11px; padding:5px 8px; }
+    #fullscreen-btn { font-size:12.5px; padding:10px 12px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
@@ -601,12 +530,13 @@ PAGE = r"""<!DOCTYPE html>
     :root { --sidebar-w: 88vw; }
     .msg { font-size:13.5px; }
     header h1 { font-size:13px; }
+    #speak-toggle { display:none; }
   }
 </style>
 </head>
 <body>
 <div class="layout">
-  <div id="sidebar-overlay"></div>
+  <div id="sidebar-overlay" style="display:none;position:fixed;inset:0;background:#0007;z-index:99" id="sidebar-overlay"></div>
   <div id="sidebar">
     <button id="new-chat-btn">+ New chat</button>
     <div id="conv-list"></div>
@@ -617,21 +547,11 @@ PAGE = r"""<!DOCTYPE html>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Mythic AI</h1>
-        <select id="model-select" title="Select model" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer;outline:none;max-width:130px;font-family:inherit;">
-          <option value="aarav-1.0">Mythic 1.0</option>
-          <option value="aarav-2.0">Mythic 2.0</option>
-          <option value="aarav-2.5" selected>Mythic 2.5</option>
-          <option value="aarav-3.5">Mythic 3.5</option>
-          <option value="aarav-ultra">Mythic Ultra 🔒</option>
-        </select>
       </div>
       <div class="right">
-        <button id="fullscreen-btn" type="button" title="Fullscreen">
-          <span id="fullscreen-icon">⛶</span>
-        </button>
         <button id="name-btn" title="What should Mythic AI call you?">🙂</button>
         <button id="export-btn" title="Export this chat">⬇</button>
-        <button id="clear-btn" title="Delete this chat">🗑</button>
+        <button id="clear-btn">Delete chat</button>
       </div>
     </header>
 
@@ -656,15 +576,10 @@ PAGE = r"""<!DOCTYPE html>
       <button id="stop-speak-btn">Stop</button>
     </div>
 
-    <!-- Quick action buttons -->
-    <div id="quick-actions">
-      <button class="quick-btn" id="img-gen-btn" title="Generate Image">🎨 Image</button>
-      <button class="quick-btn" id="homework-btn" title="Homework Help">📚 Homework</button>
-      <button class="quick-btn" id="weather-btn" title="Weather Forecast">🌤 Weather</button>
-      <button class="quick-btn" id="search-btn" title="Web Search">🔍 Search</button>
-    </div>
-
     <div class="input-area">
+      <button id="fullscreen-btn" type="button">
+        <span id="fullscreen-icon">⛶</span> <span id="fullscreen-label">Fullscreen</span>
+      </button>
       <form id="chat-form">
         <div class="input-row">
           <!-- Attach file -->
@@ -703,61 +618,6 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Image Generation Modal -->
-<div id="img-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;align-items:center;justify-content:center;">
-  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:90%;max-width:420px;">
-    <h3 style="margin:0 0 6px;font-size:17px;">🎨 Generate Image</h3>
-    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Describe the image you want to create</p>
-    <select id="img-style" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px;margin-bottom:10px;outline:none;cursor:pointer;">
-      <option value="ghibli">🌿 Studio Ghibli</option>
-      <option value="anime">🎌 Anime</option>
-      <option value="realistic">📷 Realistic / Photographic</option>
-      <option value="oil painting">🖼 Oil Painting</option>
-      <option value="watercolor">🎨 Watercolor</option>
-      <option value="3d render">🧊 3D Render</option>
-      <option value="cartoon">🐱 Cartoon</option>
-      <option value="digital art">💻 Digital Art</option>
-      <option value="">✨ No Style (auto)</option>
-    </select>
-    <textarea id="img-prompt" rows="3" placeholder="e.g. A girl walking through a forest..."
-      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;resize:none;outline:none;"></textarea>
-    <div id="img-result" style="display:none;margin-top:12px;text-align:center;">
-      <img id="img-output" style="max-width:100%;border-radius:10px;display:block;margin:0 auto;" alt="Generated image">
-    </div>
-    <div id="img-loading" style="display:none;text-align:center;padding:20px;color:var(--muted);font-size:13px;">
-      ⏳ Generating your image... (this may take 20-30 seconds)
-    </div>
-    <div id="img-error" style="display:none;color:#ef4444;font-size:12px;margin-top:8px;"></div>
-    <div style="display:flex;gap:8px;margin-top:14px;">
-      <button id="img-generate-btn" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;">Generate</button>
-      <button id="img-close-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;font-size:14px;cursor:pointer;">Close</button>
-    </div>
-  </div>
-</div>
-
-<!-- Weather Modal -->
-<div id="weather-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:300;align-items:center;justify-content:center;">
-  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:90%;max-width:380px;">
-    <h3 style="margin:0 0 6px;font-size:17px;">🌤 Weather Forecast</h3>
-    <p style="color:var(--muted);font-size:13px;margin:0 0 14px;">Enter city name or allow location access</p>
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
-      <input id="weather-city" type="text" placeholder="e.g. Delhi, Mumbai, London..."
-        style="flex:1;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:14px;outline:none;">
-      <button id="weather-location-btn" title="Use my location"
-        style="background:var(--panel);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px 12px;font-size:18px;cursor:pointer;">📍</button>
-    </div>
-    <div id="weather-result" style="display:none;background:var(--bg);border-radius:12px;padding:16px;margin-bottom:12px;">
-      <div id="weather-content"></div>
-    </div>
-    <div id="weather-loading" style="display:none;text-align:center;padding:16px;color:var(--muted);font-size:13px;">⏳ Fetching weather...</div>
-    <div id="weather-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;"></div>
-    <div style="display:flex;gap:8px;">
-      <button id="weather-search-btn" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;">Get Weather</button>
-      <button id="weather-close-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;font-size:14px;cursor:pointer;">Close</button>
-    </div>
-  </div>
-</div>
-
 <div id="name-modal-overlay">
   <div id="name-modal">
     <h3>What should Mythic AI call you?</h3>
@@ -775,11 +635,6 @@ const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
 const form         = document.getElementById('chat-form');
 const input        = document.getElementById('input');
-const inputEl      = input;  // alias used in some places
-function autoResize() {
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
-}
 const sendBtn      = document.getElementById('send-btn');
 const clearBtn     = document.getElementById('clear-btn');
 const convListEl   = document.getElementById('conv-list');
@@ -805,83 +660,7 @@ const scrollBtn    = document.getElementById('scroll-btn');
 const speakingIndicator = document.getElementById('speaking-indicator');
 const stopSpeakBtn = document.getElementById('stop-speak-btn');
 
-let activeConvId  = null;
-let selectedModel = 'aarav-2.5';
-let vipUnlocked   = false;
-
-// --- Model selector ---
-const modelSelect = document.getElementById('model-select');
-
-function showVipModal() {
-  const existing = document.getElementById('vip-modal-overlay');
-  if (existing) { existing.style.display = 'flex'; return; }
-  const overlay = document.createElement('div');
-  overlay.id = 'vip-modal-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;';
-  overlay.innerHTML = `
-    <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:90%;max-width:340px;">
-      <div style="font-size:22px;margin-bottom:6px;">🔒 VIP Access</div>
-      <div style="color:var(--muted);font-size:13px;margin-bottom:16px;">Mythic Ultra is for VIP users only. Enter your password to unlock it.</div>
-      <input id="vip-pw-in" type="password" placeholder="VIP password"
-        style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:14px;outline:none;margin-bottom:8px;font-family:inherit;">
-      <div id="vip-pw-err" style="color:#ef4444;font-size:12px;display:none;margin-bottom:8px;">Wrong password. Try again.</div>
-      <div style="display:flex;gap:8px;">
-        <button id="vip-pw-ok" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer;">Unlock</button>
-        <button id="vip-pw-cancel" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:10px;font-size:14px;cursor:pointer;">Cancel</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-  const pwIn = overlay.querySelector('#vip-pw-in');
-  const pwErr = overlay.querySelector('#vip-pw-err');
-  pwIn.focus();
-  overlay.querySelector('#vip-pw-cancel').addEventListener('click', () => {
-    overlay.style.display = 'none';
-    modelSelect.value = selectedModel; // revert
-  });
-  overlay.querySelector('#vip-pw-ok').addEventListener('click', async () => {
-    const r = await fetch('/api/vip-unlock', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: pwIn.value.trim() }) });
-    const d = await r.json();
-    if (d.success) {
-      vipUnlocked = true; overlay.style.display = 'none';
-      selectedModel = 'aarav-ultra'; modelSelect.value = 'aarav-ultra';
-      const opt = modelSelect.querySelector('option[value="aarav-ultra"]');
-      if (opt) opt.textContent = 'Mythic Ultra ✨';
-    } else { pwErr.style.display = 'block'; pwIn.value = ''; pwIn.focus(); }
-  });
-  pwIn.addEventListener('keydown', e => { if (e.key === 'Enter') overlay.querySelector('#vip-pw-ok').click(); });
-}
-
-// Load models from API and check VIP status
-(async () => {
-  try {
-    const [mr, vr] = await Promise.all([
-      fetch('/api/models').then(r => r.json()),
-      fetch('/api/vip-status').then(r => r.json()),
-    ]);
-    vipUnlocked = vr.vip;
-    modelSelect.innerHTML = '';
-    mr.models.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.vip ? (vipUnlocked ? 'Mythic Ultra ✨' : 'Mythic Ultra 🔒') : m.name;
-      opt.dataset.vip = m.vip ? '1' : '0';
-      if (m.id === mr.default) opt.selected = true;
-      modelSelect.appendChild(opt);
-    });
-    selectedModel = mr.default;
-  } catch { /* keep static options */ }
-})();
-
-modelSelect.addEventListener('change', () => {
-  const opt = modelSelect.options[modelSelect.selectedIndex];
-  if (opt && opt.dataset.vip === '1' && !vipUnlocked) {
-    showVipModal();
-  } else {
-    selectedModel = modelSelect.value;
-  }
-});
+let activeConvId = null;
 let pendingFile  = null;
 let recognition  = null;
 let currentUtterance = null;
@@ -1010,28 +789,47 @@ function hideTyping() {
 }
 
 // --- Text-to-speech ---
-function isHindi(text) {
-  return /[\u0900-\u097F]/.test(text);
+let ttsVoicesLoaded = false;
+function getTTSVoices() {
+  return new Promise(resolve => {
+    const v = window.speechSynthesis.getVoices();
+    if (v.length > 0) { resolve(v); return; }
+    window.speechSynthesis.onvoiceschanged = () => resolve(window.speechSynthesis.getVoices());
+    setTimeout(() => resolve(window.speechSynthesis.getVoices()), 1000);
+  });
 }
-function speak(text) {
+function isHindiText(text) {
+  // Check if more than 20% of letters are Devanagari
+  const devanagari = (text.match(/[\u0900-\u097F]/g) || []).length;
+  const letters = (text.match(/[a-zA-Z\u0900-\u097F]/g) || []).length;
+  return letters > 0 && (devanagari / letters) > 0.2;
+}
+async function speak(text) {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
-  const plain = text.replace(/[#*`_~>]/g, '').trim();
+  const plain = text.replace(/[#*`_~>•\[\]]/g, '').trim();
   if (!plain) return;
+  const hindi = isHindiText(plain);
+  const voices = await getTTSVoices();
   currentUtterance = new SpeechSynthesisUtterance(plain);
   currentUtterance.rate = 1.0;
-  const hindiText = isHindi(plain);
-  currentUtterance.lang = hindiText ? 'hi-IN' : 'en-US';
-  const voices = window.speechSynthesis.getVoices();
-  const langVoice = voices.find(v => v.lang.startsWith(hindiText ? 'hi' : 'en'));
-  if (langVoice) currentUtterance.voice = langVoice;
+  currentUtterance.pitch = 1;
+  if (hindi) {
+    currentUtterance.lang = 'hi-IN';
+    const hindiVoice = voices.find(v => v.lang === 'hi-IN') || voices.find(v => v.lang.startsWith('hi'));
+    if (hindiVoice) currentUtterance.voice = hindiVoice;
+  } else {
+    currentUtterance.lang = 'en-US';
+    const engVoice = voices.find(v => v.lang === 'en-US' && v.name.includes('Google'))
+      || voices.find(v => v.lang === 'en-US')
+      || voices.find(v => v.lang.startsWith('en'));
+    if (engVoice) currentUtterance.voice = engVoice;
+  }
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
   window.speechSynthesis.speak(currentUtterance);
 }
-if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
-
 stopSpeakBtn.addEventListener('click', () => {
   window.speechSynthesis && window.speechSynthesis.cancel();
   speakingIndicator.classList.remove('show');
@@ -1044,7 +842,7 @@ function setupVoice() {
   recognition = new SR();
   recognition.continuous = false;
   recognition.interimResults = true;
-  recognition.lang = 'hi-IN';
+  recognition.lang = 'en-US';
   let finalTranscript = '';
   recognition.onstart  = () => { voiceBtn.classList.add('active', 'listening'); finalTranscript = ''; };
   recognition.onresult = (e) => {
@@ -1160,7 +958,6 @@ async function openConversation(convId) {
     (d.messages || []).forEach(m => addMessage(m.role, m.text, m.attachment));
     loadConversationList();
   } catch {}
-  if (isMobile()) closeSidebar();
 }
 
 function startNewChat() {
@@ -1168,7 +965,6 @@ function startNewChat() {
   messagesEl.innerHTML = '';
   showEmptyState();
   loadConversationList();
-  if (isMobile()) closeSidebar();
 }
 
 // --- Send / regenerate / stop ---
@@ -1189,6 +985,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   setGenerating(true);
   currentAbortController = new AbortController();
 
+  // Check if user wants an image (only on fresh sends, not regenerate)
   if (!regenerate) {
     const wantsImage = IMAGE_KEYWORDS.test(message || '') && !attachment;
     if (wantsImage) {
@@ -1197,37 +994,6 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
       if (generated) { setGenerating(false); loadConversationList(); return; }
       showTyping();
     }
-  }
-
-  const NEWS_RE = /\b(news|khabar|khabren|headline|aaj ki|today.*news|latest.*news|cricket|score|match|weather|mausam|breaking|current events?)\b/i;
-  const SEARCH_RE = /^search:\s*/i;
-  let newsContext = null;
-  if (!regenerate && message && SEARCH_RE.test(message)) {
-    const searchQuery = message.replace(SEARCH_RE, '').trim();
-    try {
-      const sr = await fetch('/api/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: searchQuery })
-      });
-      const sd = await sr.json();
-      if (sd.results && sd.results.length > 0) {
-        newsContext = `Web search results for "${searchQuery}":\n` +
-          sd.results.map((r, i) => `${i+1}. ${r.title}: ${r.snippet}`).join('\n');
-      }
-    } catch {}
-  } else if (!regenerate && message && NEWS_RE.test(message)) {
-    try {
-      const nr = await fetch('/api/news', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: message.length < 80 ? message : null })
-      });
-      const nd = await nr.json();
-      if (nd.articles && nd.articles.length > 0) {
-        newsContext = nd.articles.map((a, i) => `${i+1}. ${a.title} (${a.source})`).join('\n');
-      }
-    } catch {}
   }
 
   let aiTextNode = null;
@@ -1242,16 +1008,10 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
         attachment,
         user_name: getUserName(),
         regenerate: !!regenerate,
-        news_context: newsContext,
-        model: selectedModel,
       })
     });
     if (!r.ok || !r.body) {
       hideTyping();
-      if (r.status === 403) {
-        const e = await r.json().catch(() => ({}));
-        if (e.error === 'vip_required') { showVipModal(); return; }
-      }
       addMessage('error', 'Something went wrong. Try again.');
       return;
     }
@@ -1277,6 +1037,7 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   } catch (err) {
     hideTyping();
     if (err.name === 'AbortError') {
+      // User hit stop — keep whatever text streamed in so far, just mark it as stopped.
       if (aiTextNode && !aiTextNode.textContent.trim()) aiTextNode.textContent = '[Stopped]';
     } else {
       addMessage('error', 'Network error: ' + err.message);
@@ -1343,6 +1104,7 @@ sidebarOverlay.addEventListener('click', closeSidebar);
 // Fullscreen toggle (works on Android/desktop; iOS Safari has no real Fullscreen API,
 // so it falls back to a "pseudo-fullscreen" mode that maximizes the app view instead)
 const fullscreenIcon  = document.getElementById('fullscreen-icon');
+const fullscreenLabel = document.getElementById('fullscreen-label');
 const fsSupported = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen);
 
 function isFullscreen() {
@@ -1352,11 +1114,11 @@ function isFullscreen() {
 function updateFullscreenBtn() {
   if (isFullscreen()) {
     fullscreenIcon.textContent = '⤢';
-    fullscreenBtn.title = 'Exit fullscreen';
+    fullscreenLabel.textContent = 'Exit fullscreen';
     fullscreenBtn.classList.add('active');
   } else {
     fullscreenIcon.textContent = '⛶';
-    fullscreenBtn.title = 'Fullscreen';
+    fullscreenLabel.textContent = 'Fullscreen';
     fullscreenBtn.classList.remove('active');
   }
 }
@@ -1372,11 +1134,14 @@ async function toggleFullscreen() {
         else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
       }
     } else {
+      // iOS Safari / in-app browsers: real Fullscreen API isn't available,
+      // so just maximize the app view (hides scroll bounce, fills the screen).
       document.body.classList.toggle('pseudo-fullscreen');
       updateFullscreenBtn();
     }
   } catch (err) {
     console.warn('Fullscreen request failed:', err);
+    // Even on failure, fall back to pseudo-fullscreen so the button still does something
     document.body.classList.toggle('pseudo-fullscreen');
     updateFullscreenBtn();
   }
@@ -1386,10 +1151,10 @@ document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
 // "What should Mythic AI call you?" — stored locally, sent with every chat request
-function getUserName() { return localStorage.getItem('aarav_user_name') || ''; }
+function getUserName() { return localStorage.getItem('mythic_user_name') || ''; }
 function setUserName(name) {
-  if (name) localStorage.setItem('aarav_user_name', name);
-  else localStorage.removeItem('aarav_user_name');
+  if (name) localStorage.setItem('mythic_user_name', name);
+  else localStorage.removeItem('mythic_user_name');
 }
 function openNameModal() {
   nameInput.value = getUserName();
@@ -1408,11 +1173,20 @@ nameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); nameSaveBtn.click(); }
   else if (e.key === 'Escape') closeNameModal();
 });
-if (!localStorage.getItem('aarav_name_prompted')) {
-  localStorage.setItem('aarav_name_prompted', '1');
+// First-time visitors get a gentle one-time prompt
+if (!localStorage.getItem('mythic_name_prompted')) {
+  localStorage.setItem('mythic_name_prompted', '1');
   setTimeout(openNameModal, 600);
 }
 
+// Auto-close sidebar on mobile after picking a conversation
+const _origOpen = openConversation;
+async function openConversation(id) {
+  await _origOpen(id);
+  if (isMobile()) closeSidebar();
+}
+
+// Hide sidebar by default on mobile
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
 clearBtn.addEventListener('click', async () => {
@@ -1447,211 +1221,6 @@ exportBtn.addEventListener('click', async () => {
   }
 });
 
-// --- Image Generation ---
-const imgModalOverlay = document.getElementById('img-modal-overlay');
-const imgPrompt       = document.getElementById('img-prompt');
-const imgResult       = document.getElementById('img-result');
-const imgOutput       = document.getElementById('img-output');
-const imgLoading      = document.getElementById('img-loading');
-const imgError        = document.getElementById('img-error');
-const imgGenerateBtn  = document.getElementById('img-generate-btn');
-const imgCloseBtn     = document.getElementById('img-close-btn');
-const imgGenBtn       = document.getElementById('img-gen-btn');
-
-const imgStyle        = document.getElementById('img-style');
-
-imgGenBtn.addEventListener('click', () => {
-  imgModalOverlay.style.display = 'flex';
-  imgPrompt.focus();
-  imgResult.style.display = 'none';
-  imgError.style.display = 'none';
-  imgLoading.style.display = 'none';
-});
-imgCloseBtn.addEventListener('click', () => { imgModalOverlay.style.display = 'none'; });
-imgModalOverlay.addEventListener('click', e => { if (e.target === imgModalOverlay) imgModalOverlay.style.display = 'none'; });
-
-imgGenerateBtn.addEventListener('click', async () => {
-  const prompt = imgPrompt.value.trim();
-  const style = imgStyle ? imgStyle.value : '';
-  if (!prompt) return;
-  imgResult.style.display = 'none';
-  imgError.style.display = 'none';
-  imgLoading.style.display = 'block';
-  imgGenerateBtn.disabled = true;
-  try {
-    const r = await fetch('/api/generate-image', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, style })
-    });
-    const d = await r.json();
-    imgLoading.style.display = 'none';
-    if (d.image) {
-      imgOutput.src = 'data:image/png;base64,' + d.image;
-      imgResult.style.display = 'block';
-      clearEmptyState();
-      const div = document.createElement('div');
-      div.className = 'msg-row ai';
-      const bubble = document.createElement('div');
-      bubble.className = 'msg ai';
-      const caption = document.createElement('div');
-      caption.textContent = '🎨 ' + prompt;
-      caption.style.cssText = 'font-size:12px;opacity:.7;margin-bottom:8px;';
-      const img = document.createElement('img');
-      img.src = 'data:image/png;base64,' + d.image;
-      img.style.cssText = 'max-width:100%;border-radius:10px;display:block;';
-      bubble.appendChild(caption);
-      bubble.appendChild(img);
-      div.appendChild(bubble);
-      messagesEl.appendChild(div);
-      scrollToBottom();
-    } else {
-      imgError.textContent = d.error || 'Generation failed. Try a different prompt.';
-      imgError.style.display = 'block';
-    }
-  } catch (e) {
-    imgLoading.style.display = 'none';
-    imgError.textContent = 'Network error: ' + e.message;
-    imgError.style.display = 'block';
-  } finally {
-    imgGenerateBtn.disabled = false;
-  }
-});
-imgPrompt.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); imgGenerateBtn.click(); }
-});
-
-// --- Weather ---
-const weatherOverlay    = document.getElementById('weather-modal-overlay');
-const weatherCity       = document.getElementById('weather-city');
-const weatherResult     = document.getElementById('weather-result');
-const weatherContent    = document.getElementById('weather-content');
-const weatherLoading    = document.getElementById('weather-loading');
-const weatherError      = document.getElementById('weather-error');
-const weatherSearchBtn  = document.getElementById('weather-search-btn');
-const weatherCloseBtn   = document.getElementById('weather-close-btn');
-const weatherLocationBtn= document.getElementById('weather-location-btn');
-const weatherBtn        = document.getElementById('weather-btn');
-
-weatherBtn.addEventListener('click', () => {
-  weatherOverlay.style.display = 'flex';
-  weatherCity.focus();
-  weatherResult.style.display = 'none';
-  weatherError.style.display = 'none';
-});
-weatherCloseBtn.addEventListener('click', () => { weatherOverlay.style.display = 'none'; });
-weatherOverlay.addEventListener('click', e => { if (e.target === weatherOverlay) weatherOverlay.style.display = 'none'; });
-
-async function fetchWeather(location) {
-  weatherResult.style.display = 'none';
-  weatherError.style.display = 'none';
-  weatherLoading.style.display = 'block';
-  weatherSearchBtn.disabled = true;
-  try {
-    const r = await fetch('/api/weather', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ location })
-    });
-    const d = await r.json();
-    weatherLoading.style.display = 'none';
-    if (d.weather) {
-      renderWeather(d.weather);
-    } else {
-      weatherError.textContent = d.error || 'Could not fetch weather.';
-      weatherError.style.display = 'block';
-    }
-  } catch(e) {
-    weatherLoading.style.display = 'none';
-    weatherError.textContent = 'Error: ' + e.message;
-    weatherError.style.display = 'block';
-  } finally {
-    weatherSearchBtn.disabled = false;
-  }
-}
-
-function renderWeather(w) {
-  weatherContent.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <div style="font-size:48px;line-height:1;">${w.icon}</div>
-      <div>
-        <div style="font-size:18px;font-weight:700;">${w.location}</div>
-        <div style="font-size:13px;color:var(--muted);">${w.condition}</div>
-      </div>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">TEMPERATURE</div>
-        <div style="font-size:22px;font-weight:700;">${w.temp}°C</div>
-        <div style="font-size:11px;color:var(--muted);">Feels like ${w.feels_like}°C</div>
-      </div>
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">HUMIDITY</div>
-        <div style="font-size:22px;font-weight:700;">${w.humidity}%</div>
-        <div style="font-size:11px;color:var(--muted);">Wind ${w.wind_speed} km/h</div>
-      </div>
-    </div>`;
-  weatherResult.style.display = 'block';
-  const summary = `${w.icon} Weather in ${w.location}: ${w.temp}°C, ${w.condition}. Humidity: ${w.humidity}%, Wind: ${w.wind_speed} km/h, Feels like: ${w.feels_like}°C.`;
-  inputEl.value = summary;
-  autoResize();
-}
-
-weatherSearchBtn.addEventListener('click', () => {
-  const loc = weatherCity.value.trim();
-  if (loc) fetchWeather(loc);
-});
-weatherCity.addEventListener('keydown', e => { if (e.key === 'Enter') weatherSearchBtn.click(); });
-weatherLocationBtn.addEventListener('click', () => {
-  if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
-  weatherLoading.style.display = 'block';
-  weatherLocationBtn.disabled = true;
-  navigator.geolocation.getCurrentPosition(
-    async pos => {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      weatherLocationBtn.disabled = false;
-      weatherResult.style.display = 'none';
-      weatherError.style.display = 'none';
-      weatherLoading.style.display = 'block';
-      weatherSearchBtn.disabled = true;
-      try {
-        const r = await fetch('/api/weather', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lat, lon })
-        });
-        const d = await r.json();
-        weatherLoading.style.display = 'none';
-        if (d.weather) { renderWeather(d.weather); }
-        else { weatherError.textContent = d.error || 'Could not fetch weather.'; weatherError.style.display = 'block'; }
-      } catch(e) {
-        weatherLoading.style.display = 'none';
-        weatherError.textContent = 'Error: ' + e.message; weatherError.style.display = 'block';
-      } finally { weatherSearchBtn.disabled = false; }
-    },
-    err => {
-      weatherLocationBtn.disabled = false;
-      weatherLoading.style.display = 'none';
-      alert('Could not get your location: ' + err.message);
-    }
-  );
-});
-
-// --- Homework button ---
-const homeworkBtn = document.getElementById('homework-btn');
-homeworkBtn.addEventListener('click', () => {
-  inputEl.value = 'Help me with my homework: ';
-  inputEl.focus();
-  autoResize();
-  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
-});
-
-// --- Web Search button ---
-const searchBtn = document.getElementById('search-btn');
-searchBtn.addEventListener('click', () => {
-  const q = prompt('What do you want to search for?');
-  if (!q || !q.trim()) return;
-  addMessage('user', 'Search: ' + q.trim());
-  streamReply({ message: 'Search: ' + q.trim() });
-});
-
 // Initial load
 (async () => {
   const convs = await loadConversationList();
@@ -1667,196 +1236,6 @@ searchBtn.addEventListener('click', () => {
 @login_required
 def index():
     return Response(PAGE, mimetype="text/html; charset=utf-8")
-
-
-def fetch_news(query=None, category=None):
-    """Fetch live news from NewsAPI."""
-    if not NEWS_API_KEY:
-        return None
-    params = {"apiKey": NEWS_API_KEY, "country": "in", "pageSize": 8}
-    if query:
-        params["q"] = query
-        url = "https://newsapi.org/v2/everything"
-        params.pop("country", None)
-        params["sortBy"] = "publishedAt"
-        params["language"] = "en"
-    else:
-        url = "https://newsapi.org/v2/top-headlines"
-    if category:
-        params["category"] = category
-    try:
-        r = requests.get(url, params=params, timeout=8)
-        if r.status_code == 200:
-            arts = r.json().get("articles", [])
-            return [{"title": a["title"], "source": a["source"]["name"], "url": a["url"]}
-                    for a in arts if a.get("title") and "[Removed]" not in a["title"]]
-    except Exception:
-        pass
-    return None
-
-
-@app.route("/api/news", methods=["POST"])
-@login_required
-def get_news():
-    d = request.get_json(force=True) or {}
-    arts = fetch_news(query=d.get("query"), category=d.get("category"))
-    if arts is None:
-        return jsonify({"error": "News unavailable"}), 503
-    return jsonify({"articles": arts})
-
-
-@app.route("/api/search", methods=["POST"])
-@login_required
-def web_search():
-    """Web search using DuckDuckGo's instant-answer API — free, no API key needed.
-    Best-effort: returns an abstract/answer/related-topics if DuckDuckGo has one,
-    which is often thin for long-tail queries, but works without any signup."""
-    d = request.get_json(force=True) or {}
-    query = (d.get("query") or "").strip()
-    if not query:
-        return jsonify({"error": "query required"}), 400
-    try:
-        r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
-            headers={"User-Agent": "MythicAI/1.0"},
-            timeout=8,
-        )
-        if r.status_code != 200:
-            print(f"[DuckDuckGo] search failed: HTTP {r.status_code}")
-            return jsonify({"results": [], "query": query})
-        data = r.json()
-        results = []
-        if data.get("Answer"):
-            results.append({"title": "Answer", "snippet": data["Answer"],
-                             "url": "", "source": data.get("AnswerType", "")})
-        if data.get("AbstractText"):
-            results.append({"title": data.get("Heading", query), "snippet": data["AbstractText"],
-                             "url": data.get("AbstractURL", ""), "source": data.get("AbstractSource", "")})
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""),
-                                 "url": topic.get("FirstURL", ""), "source": "DuckDuckGo"})
-        return jsonify({"results": results[:6], "query": query})
-    except Exception as e:
-        print(f"[DuckDuckGo] search error: {e}")
-        return jsonify({"error": str(e)}), 502
-
-
-@app.route("/api/weather", methods=["POST"])
-@login_required
-def get_weather():
-    """Fetch weather using Open-Meteo — free, no API key, supports city names and coordinates."""
-    d = request.get_json(force=True) or {}
-    location = (d.get("location") or "").strip()
-    lat = d.get("lat")
-    lon = d.get("lon")
-
-    if not location and (lat is None or lon is None):
-        return jsonify({"error": "location or coordinates required"}), 400
-
-    try:
-        if lat is not None and lon is not None:
-            geo_r = requests.get(
-                "https://nominatim.openstreetmap.org/reverse",
-                params={"lat": lat, "lon": lon, "format": "json"},
-                headers={"User-Agent": "MythicAI/1.0"},
-                timeout=8,
-            )
-            if geo_r.status_code == 200:
-                addr = geo_r.json().get("address", {})
-                city = addr.get("city") or addr.get("town") or addr.get("village") or "Your Location"
-                location_name = city
-            else:
-                location_name = "Your Location"
-        else:
-            geo_r = requests.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": location, "count": 1, "language": "en", "format": "json"},
-                timeout=8,
-            )
-            if geo_r.status_code != 200 or not geo_r.json().get("results"):
-                return jsonify({"error": f"City '{location}' not found. Try a different spelling."}), 404
-            result = geo_r.json()["results"][0]
-            lat = result["latitude"]
-            lon = result["longitude"]
-            location_name = result["name"] + ", " + result.get("country", "")
-
-        weather_r = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat, "longitude": lon,
-                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m",
-                "wind_speed_unit": "kmh", "timezone": "auto",
-            },
-            timeout=8,
-        )
-        if weather_r.status_code != 200:
-            return jsonify({"error": "Weather service unavailable"}), 502
-
-        current = weather_r.json()["current"]
-        wmo = {0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",
-               45:"Foggy",48:"Icy fog",51:"Light drizzle",53:"Drizzle",55:"Heavy drizzle",
-               61:"Light rain",63:"Rain",65:"Heavy rain",71:"Light snow",73:"Snow",
-               75:"Heavy snow",80:"Rain showers",81:"Heavy showers",82:"Violent showers",
-               95:"Thunderstorm",96:"Thunderstorm with hail",99:"Heavy thunderstorm"}
-        code = current.get("weather_code", 0)
-        icons = {0:"☀️",1:"🌤",2:"⛅",3:"☁️",45:"🌫",48:"🌫",
-                 51:"🌦",53:"🌧",55:"🌧",61:"🌦",63:"🌧",65:"🌧",
-                 71:"🌨",73:"❄️",75:"❄️",80:"🌧",81:"🌧",82:"⛈",
-                 95:"⛈",96:"⛈",99:"⛈"}
-        return jsonify({"weather": {
-            "location": location_name,
-            "temp": round(current["temperature_2m"]),
-            "feels_like": round(current["apparent_temperature"]),
-            "condition": wmo.get(code, "Unknown"),
-            "humidity": current["relative_humidity_2m"],
-            "wind_speed": round(current["wind_speed_10m"]),
-            "icon": icons.get(code, "🌡"),
-        }})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
-
-
-@app.route("/api/generate-image", methods=["POST"])
-@login_required
-def generate_image():
-    """Generate image using Pollinations.ai — free, no API key, works on all servers."""
-    import urllib.parse
-    d = request.get_json(force=True) or {}
-    prompt = (d.get("prompt") or "").strip()
-    style  = (d.get("style") or "").strip()
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-    full_prompt = f"{prompt}, {style} style, highly detailed, beautiful" if style else f"{prompt}, highly detailed, beautiful, 4k"
-    encoded = urllib.parse.quote(full_prompt)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&enhance=true"
-    try:
-        resp = requests.get(image_url, timeout=90)
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            return jsonify({"image": base64.b64encode(resp.content).decode()})
-        return jsonify({"error": f"Generation failed ({resp.status_code})"}), 502
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
-
-
-@app.route("/api/models")
-def get_models():
-    return jsonify({"models": MODEL_INFO, "default": DEFAULT_MODEL})
-
-
-@app.route("/api/vip-unlock", methods=["POST"])
-def vip_unlock():
-    d = request.get_json(force=True) or {}
-    if d.get("password") == VIP_PASSWORD:
-        session["vip"] = True
-        return jsonify({"success": True})
-    return jsonify({"success": False}), 403
-
-
-@app.route("/api/vip-status")
-def vip_status():
-    return jsonify({"vip": bool(session.get("vip"))})
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -1973,19 +1352,15 @@ def to_openai_messages(gemini_messages, system_prompt):
     return msgs
 
 
-def groq_stream_chunks_with_model(messages, model):
-    """Stream from Groq with a specific model. Yields NOTHING on any failure —
-    logs the real reason server-side instead of leaking raw error text into
-    the visible chat, so a calling wrapper can silently fall back to another
-    provider/model instead of the user seeing garbage like '[Groq error 400]'."""
+def groq_stream_chunks(messages):
+    """Stream from Groq API (OpenAI-compatible, very fast, generous free tier)."""
     if not GROQ_API_KEY:
-        print("[Groq] skipped: GROQ_API_KEY is not set")
         return
     try:
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
+            json={"model": GROQ_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
             stream=True, timeout=60,
         )
         if resp.status_code == 200:
@@ -2002,71 +1377,14 @@ def groq_stream_chunks_with_model(messages, model):
                         yield content
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
-            return
-        print(f"[Groq] model={model} failed: HTTP {resp.status_code} — {resp.text[:400]}")
-    except requests.RequestException as e:
-        print(f"[Groq] model={model} connection error: {e}")
-
-
-def cerebras_stream_chunks_with_model(messages, model):
-    """Stream from Cerebras with a specific model. Same silent-failure /
-    server-side-logging contract as groq_stream_chunks_with_model above."""
-    if not CEREBRAS_API_KEY:
-        print("[Cerebras] skipped: CEREBRAS_API_KEY is not set")
-        return
-    try:
-        resp = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content = obj["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        print(f"[Cerebras] model={model} failed: HTTP {resp.status_code} — {resp.text[:400]}")
-    except requests.RequestException as e:
-        print(f"[Cerebras] model={model} connection error: {e}")
-
-
-def model_stream_with_fallback(provider, model_name, openai_msgs):
-    """Try the tier's assigned provider/model first. If it fails for any
-    reason (bad key, bad model name, rate limit, network error — all logged
-    server-side above), automatically retry on the OTHER provider using that
-    provider's default model, so one broken tier doesn't take the whole app
-    down. Only shows an error to the user if BOTH providers fail."""
-    other_provider = "groq" if provider == "cerebras" else "cerebras"
-    other_model = GROQ_MODEL if other_provider == "groq" else CEREBRAS_MODEL
-
-    attempts = [(provider, model_name), (other_provider, other_model)]
-    for p, m in attempts:
-        fn = groq_stream_chunks_with_model if p == "groq" else cerebras_stream_chunks_with_model
-        collected = []
-        for chunk in fn(openai_msgs, m):
-            collected.append(chunk)
-            yield chunk
-        if collected:
-            return
-
-    yield ("[Mythic AI's backend is unavailable right now — both Groq and Cerebras "
-           "failed to respond. Check the server logs for the exact reason (bad/expired "
-           "API key, invalid model name, or rate limit), or try again in a moment.]")
+            return  # success — stop here
+        # rate limited or error — fall through (return without yielding)
+    except requests.RequestException:
+        pass
 
 
 def openrouter_stream_chunks(messages):
-    """Stream from OpenRouter (aggregates many free models). Silent on failure."""
+    """Stream from OpenRouter (aggregates many free models)."""
     if not OPENROUTER_API_KEY:
         return
     try:
@@ -2092,15 +1410,19 @@ def openrouter_stream_chunks(messages):
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
             return
-        print(f"[OpenRouter] failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        else:
+            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
+            return
     except requests.RequestException as e:
-        print(f"[OpenRouter] connection error: {e}")
+        yield f"[OpenRouter connection error: {e}]"
+        return
 
 
 def huggingface_stream_chunks(messages):
-    """Stream from Hugging Face Inference API. Silent on failure."""
+    """Stream from Hugging Face Inference API (free tier available)."""
     if not HF_API_KEY:
         return
+    # HF uses the same OpenAI-compatible endpoint format
     try:
         resp = requests.post(
             f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/chat/completions",
@@ -2123,9 +1445,107 @@ def huggingface_stream_chunks(messages):
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
             return
-        print(f"[HuggingFace] failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        else:
+            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
+            return
     except requests.RequestException as e:
-        print(f"[HuggingFace] connection error: {e}")
+        yield f"[OpenRouter connection error: {e}]"
+        return
+
+
+
+def cerebras_stream_chunks(messages):
+    """Stream from Cerebras AI (very fast, generous free tier, works on servers)."""
+    if not CEREBRAS_API_KEY:
+        return
+    try:
+        resp = requests.post(
+            "https://api.cerebras.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
+            json={"model": CEREBRAS_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
+            stream=True, timeout=60,
+        )
+        if resp.status_code == 200:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data_str)
+                    chunk = obj["choices"][0]["delta"].get("content", "")
+                    if chunk:
+                        yield chunk
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+            return
+        else:
+            yield f"[Cerebras error {resp.status_code}: {resp.text[:300]}]"
+            return
+    except requests.RequestException as e:
+        yield f"[Cerebras connection error: {e}]"
+        return
+
+
+# --- Round-robin provider rotation ------------------------------------------
+# Tracks which provider index to try FIRST next time (persists for the life
+# of the process; resets on server restart, which is fine).
+_provider_index = [0]
+
+
+def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
+    """True round-robin rotation across all configured providers.
+    No provider is primary — starts from wherever the last successful call left off.
+    If the current provider fails/is rate-limited, moves to the next one and
+    remembers that position for the next request too."""
+    sp = system_prompt or SYSTEM_PROMPT
+    openai_msgs = to_openai_messages(gemini_messages, sp)
+    ollama_msgs = to_ollama_messages(gemini_messages, sp)
+
+    # Build the full list of available providers (only those with keys)
+    all_providers = []
+    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
+        all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
+    if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
+        all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
+    if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
+        all_providers.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
+    if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
+        all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
+    if PROVIDER == "huggingface" and HF_API_KEY:
+        # HuggingFace free tier blocks server IPs (Render etc) — only use if explicitly set
+        all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
+    if PROVIDER == "ollama":
+        all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
+
+    if not all_providers:
+        yield "[No AI providers configured. Add at least one API key.]"
+        return
+
+    n = len(all_providers)
+    start = _provider_index[0] % n
+
+    # Try each provider starting from the current rotation position
+    for i in range(n):
+        idx = (start + i) % n
+        name, fn = all_providers[idx]
+        collected = []
+        try:
+            for chunk in fn():
+                collected.append(chunk)
+                yield chunk
+            if collected:
+                # Success — next request starts from the NEXT provider (true rotation)
+                _provider_index[0] = (idx + 1) % n
+                return
+        except Exception:
+            pass
+        # This provider failed — silently try the next one
+
+    yield "[All AI providers failed or are rate-limited. Try again in a moment.]"
+
+
 
 
 def gemini_stream_chunks(payload):
@@ -2140,12 +1560,12 @@ def gemini_stream_chunks(payload):
             stream=True,
             timeout=60,
         )
-    except requests.RequestException as e:
-        print(f"[Gemini] connection error: {e}")
-        return
+    except requests.RequestException:
+        return  # network error — silently fall through
 
     if resp.status_code != 200:
-        print(f"[Gemini] failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        # Auth errors (401/403), quota errors (429), and server errors (5xx)
+        # all mean "try the next provider" — don't yield anything.
         return
 
     for raw_line in resp.iter_lines(decode_unicode=True):
@@ -2166,68 +1586,15 @@ def gemini_stream_chunks(payload):
             continue
 
 
-# --- Round-robin provider rotation (used only when PROVIDER="auto" and no
-# specific model tier applies — kept for backwards compatibility) -----------
-_provider_index = [0]
-
-
-def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
-    sp = system_prompt or SYSTEM_PROMPT
-    openai_msgs = to_openai_messages(gemini_messages, sp)
-    ollama_msgs = to_ollama_messages(gemini_messages, sp)
-
-    all_providers = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
-    if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
-        all_providers.append(("Cerebras", lambda: cerebras_stream_chunks_with_model(openai_msgs, CEREBRAS_MODEL)))
-    if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
-        all_providers.append(("Groq", lambda: groq_stream_chunks_with_model(openai_msgs, GROQ_MODEL)))
-    if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
-        all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
-    if PROVIDER == "huggingface" and HF_API_KEY:
-        all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
-    if PROVIDER == "ollama":
-        all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
-
-    if not all_providers:
-        yield "[No AI providers configured. Add at least one API key.]"
-        return
-
-    n = len(all_providers)
-    start = _provider_index[0] % n
-
-    for i in range(n):
-        idx = (start + i) % n
-        name, fn = all_providers[idx]
-        collected = []
-        for chunk in fn():
-            collected.append(chunk)
-            yield chunk
-        if collected:
-            _provider_index[0] = (idx + 1) % n
-            return
-
-    yield "[All AI providers failed or are rate-limited. Try again in a moment.]"
-
-
 @app.route("/api/chat", methods=["POST"])
 @login_required
 def chat():
     data = request.get_json(force=True) or {}
     user_message = (data.get("message") or "").strip()
-    news_context = (data.get("news_context") or "").strip()
     conv_id = data.get("conversation_id")
     attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
-    user_name = (data.get("user_name") or "").strip()[:60]
+    user_name = (data.get("user_name") or "").strip()[:60]  # what Mythic AI should call the user
     regenerate = bool(data.get("regenerate"))
-    aarav_id = (data.get("model") or DEFAULT_MODEL).strip()
-
-    # VIP gate
-    if aarav_id in VIP_MODELS and not session.get("vip"):
-        return jsonify({"error": "vip_required"}), 403
-
-    provider, model_name = AARAV_MAP.get(aarav_id, AARAV_MAP[DEFAULT_MODEL])
 
     if regenerate:
         if not conv_id:
@@ -2254,15 +1621,15 @@ def chat():
     messages = conv.setdefault("messages", [])
 
     if regenerate:
+        # Drop the most recent assistant reply (if any) so a fresh one replaces it.
+        # Leaves the preceding user message in place to regenerate against.
         if messages and messages[-1]["role"] == "model":
             messages.pop()
         if not messages or messages[-1]["role"] != "user":
             return jsonify({"error": "nothing to regenerate"}), 400
     else:
         user_parts = []
-        if news_context and user_message:
-            user_parts.append({"text": f"[Live news context for this question:]\n{news_context}\n\n[User question:] {user_message}"})
-        elif user_message:
+        if user_message:
             user_parts.append({"text": user_message})
         attachment_meta = None
         if attachment:
@@ -2277,22 +1644,21 @@ def chat():
             user_entry["attachment_meta"] = attachment_meta
         messages.append(user_entry)
 
+    # Strip attachment_meta (frontend-only field) before sending to the model
     gemini_contents = [
         {"role": m["role"], "parts": m["parts"]} for m in messages
     ]
 
-    today_str = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
-    effective_system_prompt = SYSTEM_PROMPT + (
-        f" Today's real date is {today_str} (UTC) — trust this over whatever date your "
-        f"training data suggests, and use it for any question about the current date, "
-        f"year, or how long ago/from now something is."
-    )
+    effective_system_prompt = SYSTEM_PROMPT
     if user_name:
         effective_system_prompt += (
             f" The user has told you their preferred name is \"{user_name}\". "
             f"Address them as {user_name} naturally where it fits (e.g. greetings, "
             f"acknowledgements) — don't force it into every single reply."
         )
+    # Only the real Gemini call gets the "you have search" instruction — fallback
+    # providers don't have real search, so giving them that instruction makes them
+    # hallucinate fake tool-call JSON into the visible reply.
     gemini_system_prompt = effective_system_prompt + GEMINI_SEARCH_ADDENDUM
 
     payload = {
@@ -2303,13 +1669,11 @@ def chat():
 
     def generate():
         full_reply = []
-        openai_msgs = to_openai_messages(messages, effective_system_prompt)
         if PROVIDER == "ollama":
             chunk_source = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
-        elif provider in ("groq", "cerebras"):
-            chunk_source = model_stream_with_fallback(provider, model_name, openai_msgs)
         else:
             chunk_source = auto_stream_chunks(payload, messages, effective_system_prompt)
+
         for chunk in chunk_source:
             full_reply.append(chunk)
             yield chunk
@@ -2319,6 +1683,34 @@ def chat():
     resp = Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
     resp.headers["X-Conversation-Id"] = conv_id
     return resp
+
+
+@app.route("/api/generate-image", methods=["POST"])
+@app.route("/api/generate-image", methods=["POST"])
+@login_required
+def generate_image():
+    data = request.get_json(force=True) or {}
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"error": "prompt required"}), 400
+    if not HF_API_KEY:
+        return jsonify({"error": "No HuggingFace key configured"}), 503
+    # Use FLUX.1-schnell — fast, high quality, free on HF
+    model = "black-forest-labs/FLUX.1-schnell"
+    try:
+        resp = requests.post(
+            f"https://api-inference.huggingface.co/models/{model}",
+            headers={"Authorization": f"Bearer {HF_API_KEY}"},
+            json={"inputs": prompt},
+            timeout=60,
+        )
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+            img_b64 = base64.b64encode(resp.content).decode("utf-8")
+            return jsonify({"image": img_b64})
+        else:
+            return jsonify({"error": f"Image generation failed ({resp.status_code})"}), 502
+    except requests.RequestException as e:
+        return jsonify({"error": str(e)}), 502
 
 
 if __name__ == "__main__":
@@ -2338,7 +1730,4 @@ if __name__ == "__main__":
     providers_str = " → ".join(active) if active else "none configured!"
     print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (fallback order): {providers_str}")
-    if not GROQ_API_KEY and not CEREBRAS_API_KEY:
-        print("[WARNING] Neither GROQ_API_KEY nor CEREBRAS_API_KEY is set — "
-              "every model tier will fail. Set at least one.")
     app.run(host="0.0.0.0", port=5000, debug=False)
