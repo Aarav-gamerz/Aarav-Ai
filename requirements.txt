@@ -1,4 +1,5 @@
-flask
+Flask
 requests
-werkzeug
+Werkzeug
 gunicorn
+setuptools
