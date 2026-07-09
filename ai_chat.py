@@ -2089,22 +2089,26 @@ function loadGhibliPhoto(file) {
 
 // Generate Ghibli image
 ghibliGenerateBtn.addEventListener('click', async () => {
-  if (!ghibliBase64) {
-    ghibliError.textContent = 'Please upload your photo first!';
-    ghibliError.style.display = 'block'; return;
-  }
+  const extra = ghibliExtraInput.value.trim();
+  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
+
   ghibliError.style.display = 'none';
   ghibliResultWrap.style.display = 'none';
   ghibliLoading.style.display = 'block';
   ghibliGenerateBtn.disabled = true;
 
-  const extra = ghibliExtraInput.value.trim();
-  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
+  // If a photo is uploaded, we pass it to the backend (NanoBanana can do real
+  // image-to-image; Pollinations will ignore it and generate from the prompt).
+  const bodyPayload = { prompt };
+  if (ghibliBase64) {
+    bodyPayload.imageBase64 = ghibliBase64;
+    bodyPayload.mimeType = ghibliMimeType;
+  }
 
   try {
     const r = await fetch('/api/generate-image', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt, imageBase64: ghibliBase64, mimeType: ghibliMimeType })
+      body: JSON.stringify(bodyPayload)
     });
     const d = await r.json();
     ghibliLoading.style.display = 'none';
@@ -2132,7 +2136,7 @@ ghibliGenerateBtn.addEventListener('click', async () => {
     }
   } catch (e) {
     ghibliLoading.style.display = 'none';
-    ghibliError.textContent = 'Error: ' + e.message;
+    ghibliError.textContent = 'Network error: ' + e.message;
     ghibliError.style.display = 'block';
   } finally { ghibliGenerateBtn.disabled = false; }
 });
@@ -2824,12 +2828,13 @@ def generate_image():
     prompt = data.get("prompt", "").strip()
     image_b64 = data.get("imageBase64")  # optional — source photo for Ghibli Me / edits
     mime_type = data.get("mimeType", "image/jpeg")
+    style = data.get("style", "").strip()
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    # Preferred path: NanoBanana. Supports real image-to-image editing, so
-    # "Ghibli Me" can actually transform the uploaded photo instead of just
-    # generating a generic image from text.
+    full_prompt = f"{prompt}, {style}" if style else prompt
+
+    # ── 1. NanoBanana (best: real image-to-image for Ghibli Me) ─────────────
     if NANO_BANANA_API_KEY:
         image_urls = None
         if image_b64:
@@ -2842,38 +2847,47 @@ def generate_image():
             img_id = _store_temp_image(raw, mime_type)
             image_urls = [f"{request.host_url.rstrip('/')}/api/temp-image/{img_id}"]
 
-        task_id, err = nano_banana_submit(prompt, image_urls=image_urls)
-        if err:
-            return jsonify({"error": err}), 502
-        result_url, err = nano_banana_poll(task_id)
-        if err:
-            return jsonify({"error": err}), 502
-        try:
-            img_resp = requests.get(result_url, timeout=30)
-            img_resp.raise_for_status()
-            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
-        except requests.RequestException as e:
-            return jsonify({"error": f"Could not download result image: {e}"}), 502
+        task_id, err = nano_banana_submit(full_prompt, image_urls=image_urls)
+        if not err:
+            result_url, err = nano_banana_poll(task_id)
+            if not err:
+                try:
+                    img_resp = requests.get(result_url, timeout=30)
+                    img_resp.raise_for_status()
+                    return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+                except requests.RequestException:
+                    pass  # fall through to next provider
 
-    # Fallback: HuggingFace FLUX.1-schnell — text-to-image only, ignores any
-    # uploaded photo (it has no image-to-image mode here).
-    if not HF_API_KEY:
-        return jsonify({"error": "No image generation provider configured"}), 503
-    model = "black-forest-labs/FLUX.1-schnell"
+    # ── 2. HuggingFace FLUX.1-schnell (text-to-image only) ──────────────────
+    if HF_API_KEY:
+        try:
+            resp = requests.post(
+                "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+                headers={"Authorization": f"Bearer {HF_API_KEY}"},
+                json={"inputs": full_prompt},
+                timeout=90,
+            )
+            if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+                return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
+        except requests.RequestException:
+            pass  # fall through
+
+    # ── 3. Pollinations.AI — FREE, no API key, works on any server ──────────
+    # Encodes the prompt into a URL and fetches a PNG back directly.
+    # This is the guaranteed fallback so image generation always works even
+    # when no API keys are configured at all.
     try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{model}",
-            headers={"Authorization": f"Bearer {HF_API_KEY}"},
-            json={"inputs": prompt},
-            timeout=60,
-        )
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            img_b64 = base64.b64encode(resp.content).decode("utf-8")
-            return jsonify({"image": img_b64})
-        else:
-            return jsonify({"error": f"Image generation failed ({resp.status_code})"}), 502
+        import urllib.parse
+        encoded = urllib.parse.quote(full_prompt)
+        # Add a random seed so repeated identical prompts get fresh results
+        seed = int(time.time()) % 10000
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&seed={seed}&nologo=true&model=flux"
+        img_resp = requests.get(url, timeout=90)
+        if img_resp.status_code == 200 and img_resp.headers.get("content-type", "").startswith("image/"):
+            return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+        return jsonify({"error": f"Image generation failed ({img_resp.status_code}). Try a different prompt."}), 502
     except requests.RequestException as e:
-        return jsonify({"error": str(e)}), 502
+        return jsonify({"error": f"Image generation temporarily unavailable: {e}"}), 502
 
 
 if __name__ == "__main__":
