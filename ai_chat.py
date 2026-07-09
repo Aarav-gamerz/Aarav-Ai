@@ -42,6 +42,7 @@ import json
 import uuid
 import time
 import base64
+import urllib.parse
 import requests
 from flask import (
     Flask, request, jsonify, Response, session,
@@ -2118,7 +2119,10 @@ ghibliGenerateBtn.addEventListener('click', async () => {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(bodyPayload)
     });
-    const d = await r.json();
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); }
+    catch { d = {error: `Server error (${r.status}). Please try again in a moment.`}; }
     ghibliLoading.style.display = 'none';
     if (d.image) {
       ghibliResult.src = 'data:image/png;base64,' + d.image;
@@ -2183,8 +2187,16 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
   imgResultEl.style.display = 'none'; imgErrorEl.style.display = 'none';
   imgLoadingEl.style.display = 'block'; imgGenerateBtn2.disabled = true;
   try {
-    const r = await fetch('/api/generate-image', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,style})});
-    const d = await r.json();
+    const r = await fetch('/api/generate-image', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({prompt, style})
+    });
+    // Always parse response text first — avoids crashing on HTML error pages
+    const text = await r.text();
+    let d;
+    try { d = JSON.parse(text); }
+    catch { d = {error: `Server error (${r.status}). Please try again in a moment.`}; }
     imgLoadingEl.style.display = 'none';
     if (d.image) {
       lastGeneratedImageB64 = d.image;
@@ -2200,8 +2212,15 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
       img.style.cssText = 'max-width:100%;border-radius:10px;display:block;';
       bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
       messagesEl.appendChild(row); scrollToBottom();
-    } else { imgErrorEl.textContent = d.error || 'Image generation failed. Try again.'; imgErrorEl.style.display='block'; }
-  } catch(e) { imgLoadingEl.style.display='none'; imgErrorEl.textContent='Network error: '+e.message; imgErrorEl.style.display='block'; }
+    } else {
+      imgErrorEl.textContent = d.error || 'Image generation failed. Try again.';
+      imgErrorEl.style.display = 'block';
+    }
+  } catch(e) {
+    imgLoadingEl.style.display = 'none';
+    imgErrorEl.textContent = 'Connection error: ' + e.message + '. Check your internet and try again.';
+    imgErrorEl.style.display = 'block';
+  }
   finally { imgGenerateBtn2.disabled = false; }
 });
 if (imgCloseBtn2) imgCloseBtn2.addEventListener('click', () => imgModalOverlay.style.display='none');
@@ -2832,131 +2851,124 @@ def serve_temp_image(img_id):
 @app.route("/api/generate-image", methods=["POST"])
 @login_required
 def generate_image():
-    data = request.get_json(force=True) or {}
-    prompt = data.get("prompt", "").strip()
-    image_b64 = data.get("imageBase64")  # optional — source photo for Ghibli Me / edits
-    mime_type = data.get("mimeType", "image/jpeg")
-    style = data.get("style", "").strip()
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-
-    full_prompt = f"{prompt}, {style}" if style else prompt
-
-    # ── Auto-enhance prompt for better output quality ────────────────────────
-    # Detect context and append quality boosters the user doesn't need to type.
-    # Book covers get portrait orientation; people get photorealism helpers; etc.
-    prompt_lower = full_prompt.lower()
-    is_book     = any(w in prompt_lower for w in ["book cover", "book", "novel cover", "textbook"])
-    is_portrait = any(w in prompt_lower for w in ["portrait", "person", "face", "selfie", "photo of"])
-    is_logo     = any(w in prompt_lower for w in ["logo", "icon", "emblem", "badge"])
-    is_anime    = any(w in prompt_lower for w in ["anime", "ghibli", "manga", "cartoon", "illustration"])
-    is_landscape= any(w in prompt_lower for w in ["landscape", "scenery", "nature", "city", "skyline", "aerial"])
-
-    # Quality tail appended to every prompt
-    quality_tail = ", masterpiece, best quality, highly detailed, sharp focus, professional"
-
-    if is_book:
-        enhanced = (
-            f"{full_prompt}, professional book cover design, elegant typography layout, "
-            f"dramatic lighting, rich colors, visually striking, award-winning cover art, "
-            f"publishing industry standard{quality_tail}"
-        )
-        width, height = 512, 768   # portrait — standard book ratio
-    elif is_portrait:
-        enhanced = (
-            f"{full_prompt}, cinematic portrait photography, soft studio lighting, "
-            f"8K ultra-detailed, DSLR quality, photorealistic{quality_tail}"
-        )
-        width, height = 512, 768
-    elif is_logo:
-        enhanced = (
-            f"{full_prompt}, clean vector style, minimalist, professional brand design, "
-            f"flat design, scalable, high contrast{quality_tail}"
-        )
-        width, height = 768, 768
-    elif is_anime:
-        enhanced = (
-            f"{full_prompt}, vibrant anime art, clean linework, beautiful coloring, "
-            f"Studio Ghibli quality, cel shading{quality_tail}"
-        )
-        width, height = 768, 768
-    elif is_landscape:
-        enhanced = (
-            f"{full_prompt}, epic wide shot, golden hour lighting, ultra-wide, "
-            f"breathtaking scenery, National Geographic quality{quality_tail}"
-        )
-        width, height = 896, 512   # landscape ratio
-    else:
-        enhanced = f"{full_prompt}{quality_tail}"
-        width, height = 768, 768
-
-    # Negative prompt — things we never want in any image
-    negative = (
-        "blurry, low quality, pixelated, distorted, deformed, ugly, bad anatomy, "
-        "watermark, signature, text errors, garbled text, poorly drawn, disfigured, "
-        "oversaturated, washed out, extra limbs, duplicate, clone, artifact, noise"
-    )
-
-
-    # ── 1. NanoBanana (best: real image-to-image for Ghibli Me) ─────────────
-    if NANO_BANANA_API_KEY:
-        image_urls = None
-        if image_b64:
-            try:
-                raw = base64.b64decode(image_b64, validate=True)
-            except Exception:
-                return jsonify({"error": "invalid image data"}), 400
-            if len(raw) > MAX_UPLOAD_BYTES:
-                return jsonify({"error": "image too large (max 8MB)"}), 400
-            img_id = _store_temp_image(raw, mime_type)
-            base_url = request.host_url.rstrip('/')
-            image_urls = [f"{base_url}/api/temp-image/{img_id}"]
-
-        task_id, err = nano_banana_submit(enhanced, image_urls=image_urls)
-        if not err:
-            result_url, err = nano_banana_poll(task_id)
-            if not err:
-                try:
-                    img_resp = requests.get(result_url, timeout=30)
-                    img_resp.raise_for_status()
-                    return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
-                except requests.RequestException:
-                    pass  # fall through to next provider
-
-    # ── 2. HuggingFace FLUX.1-schnell (text-to-image only) ──────────────────
-    if HF_API_KEY:
-        try:
-            resp = requests.post(
-                "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
-                headers={"Authorization": f"Bearer {HF_API_KEY}"},
-                json={"inputs": enhanced},
-                timeout=90,
-            )
-            if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-                return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
-        except requests.RequestException:
-            pass  # fall through
-
-    # ── 3. Pollinations.AI — FREE, no API key, works on any server ──────────
-    # Uses the enhanced prompt, smart dimensions, negative prompt, and the
-    # flux model with enhancement enabled for much better output quality.
     try:
-        import urllib.parse
+        data = request.get_json(force=True) or {}
+        prompt = data.get("prompt", "").strip()
+        image_b64 = data.get("imageBase64")
+        mime_type = data.get("mimeType", "image/jpeg")
+        style = data.get("style", "").strip()
+        if not prompt:
+            return jsonify({"error": "prompt required"}), 400
+
+        full_prompt = f"{prompt}, {style}" if style else prompt
+
+        # ── Auto-enhance prompt for better output quality ────────────────────
+        prompt_lower = full_prompt.lower()
+        is_book      = any(w in prompt_lower for w in ["book cover", "book", "novel cover", "textbook"])
+        is_portrait  = any(w in prompt_lower for w in ["portrait", "person", "face", "selfie", "photo of"])
+        is_logo      = any(w in prompt_lower for w in ["logo", "icon", "emblem", "badge"])
+        is_anime     = any(w in prompt_lower for w in ["anime", "ghibli", "manga", "cartoon", "illustration"])
+        is_landscape = any(w in prompt_lower for w in ["landscape", "scenery", "nature", "city", "skyline", "aerial"])
+
+        quality_tail = ", masterpiece, best quality, highly detailed, sharp focus, professional"
+
+        if is_book:
+            enhanced = (
+                f"{full_prompt}, professional book cover design, elegant typography layout, "
+                f"dramatic lighting, rich colors, visually striking, award-winning cover art, "
+                f"publishing industry standard{quality_tail}"
+            )
+            width, height = 512, 768
+        elif is_portrait:
+            enhanced = (
+                f"{full_prompt}, cinematic portrait photography, soft studio lighting, "
+                f"8K ultra-detailed, DSLR quality, photorealistic{quality_tail}"
+            )
+            width, height = 512, 768
+        elif is_logo:
+            enhanced = (
+                f"{full_prompt}, clean vector style, minimalist, professional brand design, "
+                f"flat design, scalable, high contrast{quality_tail}"
+            )
+            width, height = 768, 768
+        elif is_anime:
+            enhanced = (
+                f"{full_prompt}, vibrant anime art, clean linework, beautiful coloring, "
+                f"Studio Ghibli quality, cel shading{quality_tail}"
+            )
+            width, height = 768, 768
+        elif is_landscape:
+            enhanced = (
+                f"{full_prompt}, epic wide shot, golden hour lighting, ultra-wide, "
+                f"breathtaking scenery, National Geographic quality{quality_tail}"
+            )
+            width, height = 896, 512
+        else:
+            enhanced = f"{full_prompt}{quality_tail}"
+            width, height = 768, 768
+
+        negative = (
+            "blurry, low quality, pixelated, distorted, deformed, ugly, bad anatomy, "
+            "watermark, signature, text errors, garbled text, poorly drawn, disfigured, "
+            "oversaturated, washed out, extra limbs, duplicate, clone, artifact, noise"
+        )
+
+        # ── 1. NanoBanana (real image-to-image, best for Ghibli Me) ──────────
+        if NANO_BANANA_API_KEY:
+            image_urls = None
+            if image_b64:
+                try:
+                    raw = base64.b64decode(image_b64, validate=True)
+                    if len(raw) > MAX_UPLOAD_BYTES:
+                        return jsonify({"error": "image too large (max 8MB)"}), 400
+                    img_id = _store_temp_image(raw, mime_type)
+                    base_url = request.host_url.rstrip('/')
+                    image_urls = [f"{base_url}/api/temp-image/{img_id}"]
+                except Exception:
+                    pass  # bad base64 — fall through without the image
+            try:
+                task_id, err = nano_banana_submit(enhanced, image_urls=image_urls)
+                if not err:
+                    result_url, err = nano_banana_poll(task_id)
+                    if not err:
+                        img_resp = requests.get(result_url, timeout=30)
+                        img_resp.raise_for_status()
+                        return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
+            except Exception:
+                pass  # fall through to next provider
+
+        # ── 2. HuggingFace FLUX.1-schnell ─────────────────────────────────────
+        if HF_API_KEY:
+            try:
+                resp = requests.post(
+                    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+                    headers={"Authorization": f"Bearer {HF_API_KEY}"},
+                    json={"inputs": enhanced},
+                    timeout=90,
+                )
+                if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+                    return jsonify({"image": base64.b64encode(resp.content).decode("utf-8")})
+            except Exception:
+                pass  # fall through
+
+        # ── 3. Pollinations.AI — zero-config, always available ────────────────
         seed = int(time.time()) % 99999
         encoded_prompt   = urllib.parse.quote(enhanced)
         encoded_negative = urllib.parse.quote(negative)
-        url = (
+        poll_url = (
             f"https://image.pollinations.ai/prompt/{encoded_prompt}"
             f"?width={width}&height={height}&seed={seed}"
             f"&negative={encoded_negative}"
             f"&model=flux&enhance=true&nologo=true"
         )
-        img_resp = requests.get(url, timeout=120)
+        img_resp = requests.get(poll_url, timeout=120)
         if img_resp.status_code == 200 and img_resp.headers.get("content-type", "").startswith("image/"):
             return jsonify({"image": base64.b64encode(img_resp.content).decode("utf-8")})
-        return jsonify({"error": f"Image generation failed ({img_resp.status_code}). Try a different prompt."}), 502
-    except requests.RequestException as e:
-        return jsonify({"error": f"Image generation temporarily unavailable: {e}"}), 502
+        return jsonify({"error": f"Image generation failed (status {img_resp.status_code}). Please try again."}), 502
+
+    except Exception as e:
+        # Catch-all: always return JSON, never an HTML error page
+        return jsonify({"error": f"Image generation error: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
