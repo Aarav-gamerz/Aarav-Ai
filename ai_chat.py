@@ -1,28 +1,24 @@
 """
-Ꮇʏᴛʜɪᴄ ᴀɪ — single file, powered by Google's Gemini API or a local Ollama model.
+Ꮇʏᴛʜɪᴄ ᴀɪ — single file, powered by Groq (primary) with Cerebras as a silent
+automatic fallback. No provider selection is exposed to the user — if Groq is
+rate-limited, times out, or errors, the app transparently retries on Cerebras.
 
-Usage (Gemini — default, needs a free API key):
+Usage:
     1. pip install flask requests
-    2. Set your API key:
-         Mac/Linux:   export GEMINI_API_KEY="your-key-here"
-         Windows:     set GEMINI_API_KEY=your-key-here
+    2. Set your API keys:
+         Mac/Linux:   export GROQ_API_KEY="your-groq-key"
+                      export CEREBRAS_API_KEY="your-cerebras-key"
+         Windows:     set GROQ_API_KEY=your-groq-key
+                      set CEREBRAS_API_KEY=your-cerebras-key
     3. python ai_chat.py
     4. Open http://localhost:5000 in your browser
 
-Get a FREE API key (no credit card needed) at https://aistudio.google.com/apikey
+Get a FREE Groq API key at https://console.groq.com/keys
+Get a FREE Cerebras API key at https://cloud.cerebras.ai
 
-Usage (Ollama — fully local, no API key or internet needed):
-    1. Install Ollama from https://ollama.com and make sure it's running
-       (`ollama serve`, or it may already be running as a background service)
-    2. Pull a model, e.g.:  ollama pull llama3.1
-    3. Set the provider:
-         Mac/Linux:   export AI_PROVIDER=ollama
-         Windows:     set AI_PROVIDER=ollama
-       Optional overrides:
-         OLLAMA_URL   (default: http://localhost:11434)
-         OLLAMA_MODEL (default: llama3.1)
-    4. python ai_chat.py
-    5. Open http://localhost:5000 in your browser
+Optional — NanoBanana (nanobananaapi.ai) powers real image-to-image editing for
+"Ghibli Me"; without it, image generation falls back to HuggingFace FLUX
+(text-to-image only). Weather uses Open-Meteo, which needs no API key at all.
 
 Supabase (optional — for accounts/conversation storage across restarts & devices):
     Set these as environment variables (never hardcode secrets in this file):
@@ -34,9 +30,10 @@ Features:
 - Login/register (real accounts, hashed passwords, stored in chat_data/users.json)
 - Multi-conversation chat with sidebar, saved per-account, survives restarts
 - File/image upload (attach an image or text file to a message)
-- Web search grounding (Gemini can search Google for current info — Gemini only)
 - Streaming responses (text appears word-by-word)
-- Switchable AI backend: Google Gemini (cloud) or Ollama (local, private, free)
+- Groq primary / Cerebras automatic silent fallback — no provider picker, ever
+- Image generation, Ghibli Me (image-to-image), and full weather (current +
+  hourly + 7-day + air quality) built in
 - No rate limiting — unlimited messages
 """
 
@@ -52,20 +49,18 @@ from flask import (
 )
 
 PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
-# "auto"        = round-robin: Groq → OpenRouter → HuggingFace (all work on servers)
-# "gemini"      = Google Gemini only (free tier only works locally, not on Render)
-# "groq"        = Groq only
-# "openrouter"  = OpenRouter only
-# "huggingface" = Hugging Face only
-# "ollama"      = local Ollama only
+# "auto"  = Groq first, silently falls back to Cerebras on any failure (rate limit,
+#           timeout, invalid model, network error, 429/500/503, etc.)
+# "groq"     = Groq only
+# "cerebras" = Cerebras only
 
 # --- API Keys (hardcoded fallbacks — override via environment variables) ------
 # WARNING: don't commit a file with real keys to a public GitHub repo.
 # Set these as environment variables on Render instead.
-GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
-OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","")
+# HF is kept ONLY as a text-to-image fallback for /api/generate-image when
+# NanoBanana isn't configured — it is NOT used as a chat/text provider.
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 # NanoBanana API (nanobananaapi.ai) — powers "Ghibli Me" image editing so it can
 # actually transform the user's uploaded photo (image-to-image), not just
@@ -75,54 +70,36 @@ NANO_BANANA_API_KEY = os.environ.get("NANO_BANANA_API_KEY", "")
 NANO_BANANA_BASE     = "https://api.nanobananaapi.ai/api/v1/nanobanana"
 
 # --- Model names -------------------------------------------------------------
-GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
-OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
 HF_MODEL          = os.environ.get("HF_MODEL",          "mistralai/Mistral-7B-Instruct-v0.3")
 CEREBRAS_MODEL    = os.environ.get("CEREBRAS_MODEL",    "gpt-oss-120b")
-OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL",       "llama3.1")
-OLLAMA_URL        = os.environ.get("OLLAMA_URL",         "http://localhost:11434").rstrip("/")
 
-GEMINI_STREAM_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:streamGenerateContent"
-)
-
-# keep old name for compatibility with existing references below
-API_KEY = GEMINI_API_KEY
-MODEL   = GEMINI_MODEL
 SYSTEM_PROMPT = (
     "You are Ꮇʏᴛʜɪᴄ ᴀɪ, a smart and friendly AI assistant made by Aarav Singh. "
     "If asked who made you, say you are Ꮇʏᴛʜɪᴄ ᴀɪ made by Aarav Singh — say it once naturally, never repeat it unprompted. "
-    "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
+    "Never mention Google, Groq, OpenRouter, HuggingFace, Cerebras, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
     "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in — "
-    "never mix two languages in a single reply. If they write in Hindi, reply fully in Hindi. "
-    "If they write in English, reply fully in English (do not slip into Hindi or any other language "
-    "partway through, even if source information you know is in a different language — translate it "
-    "into the reply language first). If they mix languages themselves, match their mix. "
-    "Never force English on the user. "
+    "never mix two languages in a single reply, and never produce garbled or mis-encoded text. "
+    "If they write in Hindi, reply fully in Hindi (in proper Devanagari script, never romanized or "
+    "mis-encoded). If they write in Tamil, reply fully in Tamil (Tamil script). The same rule applies "
+    "to Gujarati, Marathi, Bengali, Telugu, Malayalam, or any other language — always reply in that "
+    "language's own native script, fully and consistently, from the first word to the last. "
+    "If they write in English, reply fully in English (do not slip into any other language partway "
+    "through, even if source information you know is in a different language — translate it into the "
+    "reply language first). If they mix languages themselves, match their mix. Never force English "
+    "on the user. "
     "TOOL USE: Never write out fake tool calls, function names, or JSON like {\"query\": ...} in your reply — "
-    "those are internal mechanisms the user must never see. If you don't actually have live web access, "
-    "just answer from what you know and say your information may not be fully up to date, instead of "
-    "pretending to search. "
+    "those are internal mechanisms the user must never see. You do not have live web search access — "
+    "answer from what you know and say your information may not be fully up to date if asked about "
+    "very recent events, instead of pretending to search. "
     "ANTI-REPETITION RULES — follow strictly every reply: "
     "1. NEVER restate or echo back what the user just said. Jump straight to the answer. "
     "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
     "3. NEVER repeat information already given earlier in the conversation. Build on it. "
     "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
     "5. Keep answers concise unless the user asks for detail."
-)
-
-# Extra instruction appended ONLY for Gemini, which actually has a real google_search tool wired up.
-# Other providers (Groq/Cerebras/OpenRouter/HF/Ollama) have no real search access, so telling them
-# "you have search" makes them hallucinate fake tool-call JSON into the visible reply — hence this
-# is kept separate from the base SYSTEM_PROMPT above.
-GEMINI_SEARCH_ADDENDUM = (
-    " WEB SEARCH: You have access to Google Search. When the user asks about current events, "
-    "live prices, news, sports scores, weather, or anything that needs up-to-date information, "
-    "use the search tool to find the answer. Do not say you cannot search the web. When you use "
-    "search results, translate/summarize them into the reply language — never paste a mix of languages."
 )
 
 app = Flask(__name__)
@@ -485,15 +462,20 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
+  #vip-btn { background:none; border:1px solid var(--border); color:var(--muted);
+    width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
+  #vip-btn:hover { background:var(--panel); }
+  #vip-btn.active { color:var(--accent); border-color:var(--accent); }
 
-  /* Fullscreen bar — sits above the input row so it's always reachable on mobile,
-     away from any notch/status-bar area that can swallow top-corner taps. */
-  #fullscreen-btn { display:flex; align-items:center; justify-content:center; gap:6px;
-    width:100%; max-width:760px; margin:0 auto 8px; padding:9px 12px;
-    background:var(--panel); border:1px solid var(--border); border-radius:10px;
-    color:var(--muted); font-size:13px; cursor:pointer; touch-action:manipulation;
+  /* Fullscreen — now a small icon button in the header top-right, alongside
+     Settings, Export, and Profile. */
+  #fullscreen-btn { display:flex; align-items:center; justify-content:center;
+    width:36px; height:36px; border-radius:6px; flex-shrink:0;
+    background:none; border:1px solid var(--border);
+    color:var(--muted); font-size:15px; cursor:pointer; touch-action:manipulation;
     -webkit-tap-highlight-color:transparent; }
-  #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); }
+  #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); background:var(--panel); }
   #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
   #fullscreen-icon { font-size:15px; }
 
@@ -682,9 +664,10 @@ PAGE = r"""<!DOCTYPE html>
     #name-btn { width:38px; height:38px; font-size:14px; }
     #settings-btn { width:38px; height:38px; font-size:14px; }
     #export-btn { width:38px; height:38px; font-size:14px; }
+    #vip-btn { width:38px; height:38px; font-size:14px; }
     #clear-btn { font-size:11px; padding:8px 10px; min-height:38px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
-    #fullscreen-btn { font-size:12.5px; padding:10px 12px; }
+    #fullscreen-btn { width:38px; height:38px; font-size:14px; }
 
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
@@ -731,14 +714,12 @@ PAGE = r"""<!DOCTYPE html>
       <div class="left">
         <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
         <h1>Ꮇʏᴛʜɪᴄ ᴀɪ</h1>
-        <select id="model-select" title="Select model" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer;outline:none;max-width:130px;font-family:inherit;">
-          <option value="mythic-1" data-vip="0">Mythic 1</option>
-          <option value="mythic-2" data-vip="0" selected>Mythic 2</option>
-          <option value="mythic-3" data-vip="0">Mythic 3</option>
-          <option value="mythic-vip" data-vip="1">Mythic VIP 🔒</option>
-        </select>
       </div>
       <div class="right">
+        <button id="vip-btn" title="Mythic VIP">✨</button>
+        <button id="fullscreen-btn" type="button" title="Fullscreen">
+          <span id="fullscreen-icon">⛶</span>
+        </button>
         <button id="name-btn" title="What should Ꮇʏᴛʜɪᴄ ᴀɪ call you?">🙂</button>
         <button id="settings-btn" title="Settings">⚙</button>
         <button id="export-btn" title="Export this chat">⬇</button>
@@ -775,9 +756,6 @@ PAGE = r"""<!DOCTYPE html>
       <button class="quick-btn" id="weather-btn">🌤 Weather</button>
       <button class="quick-btn" id="search-btn">🔍 Search</button>
     </div>
-      <button id="fullscreen-btn" type="button">
-        <span id="fullscreen-icon">⛶</span> <span id="fullscreen-label">Fullscreen</span>
-      </button>
       <form id="chat-form">
         <div class="input-row">
           <!-- Attach file -->
@@ -944,6 +922,84 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<!-- ─── IMAGE GENERATION MODAL ─────────────────────────────────────────────── -->
+<div id="img-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:440px;max-height:90vh;overflow-y:auto;">
+    <h3 style="margin:0 0 4px;font-size:18px;">🎨 Generate Image</h3>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Describe what you want to see</p>
+
+    <textarea id="img-prompt" rows="3" placeholder="e.g. a cozy cabin in a snowy forest, golden hour lighting"
+      style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;resize:vertical;"></textarea>
+
+    <div style="margin-bottom:14px;">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Style (optional):</label>
+      <select id="img-style" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;font-family:inherit;">
+        <option value="">Default</option>
+        <option value="photorealistic, highly detailed, 8k">Photorealistic</option>
+        <option value="anime style, vibrant colors">Anime</option>
+        <option value="digital painting, fantasy art">Fantasy Art</option>
+        <option value="watercolor painting, soft pastel colors">Watercolor</option>
+        <option value="3d render, octane render, cinematic lighting">3D Render</option>
+        <option value="minimalist flat vector illustration">Minimalist</option>
+      </select>
+    </div>
+
+    <div id="img-loading" style="display:none;text-align:center;padding:20px;">
+      <div style="font-size:32px;margin-bottom:8px;">🎨</div>
+      <div style="color:var(--muted);font-size:13px;">Generating your image...<br><span style="font-size:11px;">This can take a moment</span></div>
+    </div>
+    <div id="img-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
+
+    <div id="img-result" style="display:none;margin-bottom:12px;text-align:center;">
+      <img id="img-output" style="max-width:100%;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);cursor:zoom-in;">
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button id="img-download-btn" style="flex:1;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">⬇ Download</button>
+        <button id="img-copy-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">📋 Copy</button>
+        <button id="img-fullscreen-btn" style="flex:1;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:13px;cursor:pointer;font-family:inherit;">⛶ View</button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;">
+      <button id="img-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">✨ Generate</button>
+      <button id="img-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">✕</button>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen image viewer (for the "View" button in the image modal) -->
+<div id="img-viewer-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:400;align-items:center;justify-content:center;cursor:zoom-out;">
+  <img id="img-viewer-img" style="max-width:94%;max-height:94%;border-radius:8px;">
+</div>
+
+<!-- ─── WEATHER MODAL ───────────────────────────────────────────────────────── -->
+<div id="weather-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:460px;max-height:90vh;overflow-y:auto;">
+    <h3 style="margin:0 0 4px;font-size:18px;">🌤 Weather</h3>
+    <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Search any city, or use your current location</p>
+
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <input id="weather-city" type="text" placeholder="Search city or place..." autocomplete="off"
+        style="flex:1;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:13px;outline:none;font-family:inherit;">
+      <button id="weather-search-btn" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:0 14px;font-size:14px;cursor:pointer;">🔍</button>
+      <button id="weather-location-btn" title="Use my location" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:0 12px;font-size:14px;cursor:pointer;">📍</button>
+    </div>
+
+    <div id="weather-loading" style="display:none;text-align:center;padding:20px;">
+      <div style="font-size:32px;margin-bottom:8px;">🌍</div>
+      <div style="color:var(--muted);font-size:13px;">Fetching weather...</div>
+    </div>
+    <div id="weather-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
+
+    <div id="weather-result" style="display:none;">
+      <div id="weather-content"></div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;margin-top:14px;">
+      <button id="weather-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:10px 16px;font-size:14px;cursor:pointer;">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const messagesWrap = document.getElementById('messages-wrap');
 const messagesEl   = document.getElementById('messages');
@@ -956,10 +1012,18 @@ const newChatBtn   = document.getElementById('new-chat-btn');
 const sidebarToggle= document.getElementById('sidebar-toggle');
 const fullscreenBtn= document.getElementById('fullscreen-btn');
 const nameBtn       = document.getElementById('name-btn');
-const modelSelect   = document.getElementById('model-select');
+const vipBtn        = document.getElementById('vip-btn');
 
 let selectedModel = 'mythic-2';
 let vipUnlocked   = false;
+
+function updateVipBtn() {
+  vipBtn.textContent = vipUnlocked && selectedModel === 'mythic-vip' ? '✨' : (vipUnlocked ? '✨' : '🔒');
+  vipBtn.classList.toggle('active', selectedModel === 'mythic-vip');
+  vipBtn.title = vipUnlocked
+    ? (selectedModel === 'mythic-vip' ? 'Mythic VIP active — click to switch back' : 'Switch to Mythic VIP')
+    : 'Unlock Mythic VIP';
+}
 
 function showVipModal() {
   const existing = document.getElementById('vip-modal-overlay');
@@ -981,7 +1045,6 @@ function showVipModal() {
   pwIn.focus();
   overlay.querySelector('#vip-pw-cancel').addEventListener('click', () => {
     overlay.style.display = 'none';
-    modelSelect.value = selectedModel;
   });
   overlay.querySelector('#vip-pw-ok').addEventListener('click', async () => {
     try {
@@ -994,9 +1057,7 @@ function showVipModal() {
         vipUnlocked = true;
         overlay.style.display = 'none';
         selectedModel = 'mythic-vip';
-        modelSelect.value = 'mythic-vip';
-        const opt = modelSelect.querySelector('option[value="mythic-vip"]');
-        if (opt) opt.textContent = 'Mythic VIP ✨';
+        updateVipBtn();
       } else {
         pwErr.style.display = 'block'; pwIn.value = ''; pwIn.focus();
       }
@@ -1008,7 +1069,8 @@ function showVipModal() {
   pwIn.addEventListener('keydown', e => { if (e.key === 'Enter') overlay.querySelector('#vip-pw-ok').click(); });
 }
 
-// Populate model list from the backend (falls back to the static HTML options if it fails)
+// Pull default model + VIP status from the backend (provider itself is chosen
+// automatically server-side — this only tracks the VIP-tier flag)
 (async () => {
   try {
     const [mr, vr] = await Promise.all([
@@ -1016,30 +1078,17 @@ function showVipModal() {
       fetch('/api/vip-status').then(r => r.json()),
     ]);
     vipUnlocked = !!vr.vip;
-    if (mr && Array.isArray(mr.models) && mr.models.length) {
-      modelSelect.innerHTML = '';
-      mr.models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.vip ? (vipUnlocked ? m.name.replace('🔒', '✨') : m.name) : m.name;
-        opt.dataset.vip = m.vip ? '1' : '0';
-        if (m.id === mr.default) opt.selected = true;
-        modelSelect.appendChild(opt);
-      });
-      selectedModel = mr.default || selectedModel;
-    }
+    if (mr && mr.default) selectedModel = mr.default;
   } catch {
-    // Backend didn't respond — the static <option> list already in the HTML still works fine.
+    // Backend didn't respond — defaults above still work fine.
   }
+  updateVipBtn();
 })();
 
-modelSelect.addEventListener('change', () => {
-  const opt = modelSelect.options[modelSelect.selectedIndex];
-  if (opt && opt.dataset.vip === '1' && !vipUnlocked) {
-    showVipModal();
-  } else {
-    selectedModel = modelSelect.value;
-  }
+vipBtn.addEventListener('click', () => {
+  if (!vipUnlocked) { showVipModal(); return; }
+  selectedModel = selectedModel === 'mythic-vip' ? 'mythic-2' : 'mythic-vip';
+  updateVipBtn();
 });
 
 const nameModalOverlay = document.getElementById('name-modal-overlay');
@@ -1479,7 +1528,6 @@ sidebarOverlay.addEventListener('click', closeSidebar);
 // Fullscreen toggle (works on Android/desktop; iOS Safari has no real Fullscreen API,
 // so it falls back to a "pseudo-fullscreen" mode that maximizes the app view instead)
 const fullscreenIcon  = document.getElementById('fullscreen-icon');
-const fullscreenLabel = document.getElementById('fullscreen-label');
 const fsSupported = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen);
 
 function isFullscreen() {
@@ -1489,12 +1537,12 @@ function isFullscreen() {
 function updateFullscreenBtn() {
   if (isFullscreen()) {
     fullscreenIcon.textContent = '⤢';
-    fullscreenLabel.textContent = 'Exit fullscreen';
     fullscreenBtn.classList.add('active');
+    fullscreenBtn.title = 'Exit fullscreen';
   } else {
     fullscreenIcon.textContent = '⛶';
-    fullscreenLabel.textContent = 'Fullscreen';
     fullscreenBtn.classList.remove('active');
+    fullscreenBtn.title = 'Fullscreen';
   }
 }
 async function toggleFullscreen() {
@@ -2109,11 +2157,17 @@ const imgLoadingEl    = document.getElementById('img-loading');
 const imgErrorEl      = document.getElementById('img-error');
 const imgGenerateBtn2 = document.getElementById('img-generate-btn');
 const imgCloseBtn2    = document.getElementById('img-close-btn');
+const imgDownloadBtn2 = document.getElementById('img-download-btn');
+const imgCopyBtn2     = document.getElementById('img-copy-btn');
+const imgFullscreenBtn2 = document.getElementById('img-fullscreen-btn');
+const imgViewerOverlay = document.getElementById('img-viewer-overlay');
+const imgViewerImg     = document.getElementById('img-viewer-img');
+let lastGeneratedImageB64 = null;
 
 if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
   const prompt = imgPromptEl.value.trim();
   const style = imgStyleEl ? imgStyleEl.value : '';
-  if (!prompt) return;
+  if (!prompt) { imgErrorEl.textContent = 'Please enter a description first.'; imgErrorEl.style.display = 'block'; return; }
   imgResultEl.style.display = 'none'; imgErrorEl.style.display = 'none';
   imgLoadingEl.style.display = 'block'; imgGenerateBtn2.disabled = true;
   try {
@@ -2121,6 +2175,7 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
     const d = await r.json();
     imgLoadingEl.style.display = 'none';
     if (d.image) {
+      lastGeneratedImageB64 = d.image;
       imgOutputEl.src = 'data:image/png;base64,' + d.image;
       imgResultEl.style.display = 'block';
       clearEmptyState();
@@ -2133,13 +2188,37 @@ if (imgGenerateBtn2) imgGenerateBtn2.addEventListener('click', async () => {
       img.style.cssText = 'max-width:100%;border-radius:10px;display:block;';
       bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
       messagesEl.appendChild(row); scrollToBottom();
-    } else { imgErrorEl.textContent = d.error || 'Failed.'; imgErrorEl.style.display='block'; }
-  } catch(e) { imgLoadingEl.style.display='none'; imgErrorEl.textContent='Error: '+e.message; imgErrorEl.style.display='block'; }
+    } else { imgErrorEl.textContent = d.error || 'Image generation failed. Try again.'; imgErrorEl.style.display='block'; }
+  } catch(e) { imgLoadingEl.style.display='none'; imgErrorEl.textContent='Network error: '+e.message; imgErrorEl.style.display='block'; }
   finally { imgGenerateBtn2.disabled = false; }
 });
 if (imgCloseBtn2) imgCloseBtn2.addEventListener('click', () => imgModalOverlay.style.display='none');
 if (imgModalOverlay) imgModalOverlay.addEventListener('click', e => { if(e.target===imgModalOverlay) imgModalOverlay.style.display='none'; });
 if (imgPromptEl) imgPromptEl.addEventListener('keydown', e => { if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();imgGenerateBtn2.click();} });
+if (imgDownloadBtn2) imgDownloadBtn2.addEventListener('click', () => {
+  if (!lastGeneratedImageB64) return;
+  const a = document.createElement('a');
+  a.href = 'data:image/png;base64,' + lastGeneratedImageB64;
+  a.download = 'mythic-ai-image-' + Date.now() + '.png';
+  document.body.appendChild(a); a.click(); a.remove();
+});
+if (imgCopyBtn2) imgCopyBtn2.addEventListener('click', async () => {
+  if (!lastGeneratedImageB64) return;
+  try {
+    const res = await fetch('data:image/png;base64,' + lastGeneratedImageB64);
+    const blob = await res.blob();
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    const orig = imgCopyBtn2.textContent;
+    imgCopyBtn2.textContent = '✓ Copied';
+    setTimeout(() => { imgCopyBtn2.textContent = orig; }, 1200);
+  } catch { imgErrorEl.textContent = 'Copy not supported in this browser.'; imgErrorEl.style.display = 'block'; }
+});
+if (imgFullscreenBtn2) imgFullscreenBtn2.addEventListener('click', () => {
+  if (!lastGeneratedImageB64) return;
+  imgViewerImg.src = 'data:image/png;base64,' + lastGeneratedImageB64;
+  imgViewerOverlay.style.display = 'flex';
+});
+if (imgViewerOverlay) imgViewerOverlay.addEventListener('click', () => imgViewerOverlay.style.display = 'none');
 
 // ─── WEATHER MODAL JS ────────────────────────────────────────────────────────
 const weatherModal2    = document.getElementById('weather-modal-overlay');
@@ -2152,28 +2231,108 @@ const weatherSearchBtn2= document.getElementById('weather-search-btn');
 const weatherCloseBtn2 = document.getElementById('weather-close-btn');
 const weatherLocBtn2   = document.getElementById('weather-location-btn');
 
+function getRecentWeatherSearches() {
+  try { return JSON.parse(localStorage.getItem('mythic_recent_weather') || '[]'); } catch { return []; }
+}
+function addRecentWeatherSearch(name) {
+  let list = getRecentWeatherSearches().filter(x => x.toLowerCase() !== name.toLowerCase());
+  list.unshift(name);
+  list = list.slice(0, 6);
+  localStorage.setItem('mythic_recent_weather', JSON.stringify(list));
+}
+function renderRecentSearches() {
+  const recents = getRecentWeatherSearches();
+  const wrap = document.getElementById('weather-recents');
+  if (!recents.length) { if (wrap) wrap.remove(); return; }
+  let el = wrap;
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'weather-recents';
+    el.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;';
+    weatherCityEl2.parentNode.insertAdjacentElement('afterend', el);
+  }
+  el.innerHTML = '';
+  recents.forEach(name => {
+    const chip = document.createElement('button');
+    chip.textContent = name;
+    chip.style.cssText = 'background:var(--bg);border:1px solid var(--border);color:var(--muted);border-radius:20px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
+    chip.addEventListener('click', () => fetchWeatherModal({ location: name }));
+    el.appendChild(chip);
+  });
+}
+
 function renderWeather(w) {
+  const hourly = (w.hourly || []).map(h => `
+    <div style="flex:0 0 auto;text-align:center;background:var(--bg);border-radius:10px;padding:8px 12px;min-width:64px;">
+      <div style="font-size:11px;color:var(--muted);">${h.time}</div>
+      <div style="font-size:20px;margin:4px 0;">${h.icon}</div>
+      <div style="font-size:13px;font-weight:700;">${h.temp}°</div>
+    </div>`).join('');
+
+  const daily = (w.daily || []).map(d => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border);">
+      <div style="flex:1;font-size:13px;">${d.day}</div>
+      <div style="font-size:18px;">${d.icon}</div>
+      <div style="flex:1;text-align:right;font-size:13px;"><span style="font-weight:700;">${d.max}°</span> <span style="color:var(--muted);">${d.min}°</span></div>
+    </div>`).join('');
+
   weatherContentEl2.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-      <div style="font-size:48px;">${w.icon}</div>
-      <div><div style="font-size:18px;font-weight:700;">${w.location}</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+      <div style="font-size:52px;">${w.icon}</div>
+      <div><div style="font-size:19px;font-weight:700;">${w.location}</div>
       <div style="font-size:13px;color:var(--muted);">${w.condition}</div></div>
+      <div style="margin-left:auto;font-size:32px;font-weight:700;">${w.temp}°C</div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">TEMPERATURE</div>
-        <div style="font-size:22px;font-weight:700;">${w.temp}°C</div>
-        <div style="font-size:11px;color:var(--muted);">Feels like ${w.feels_like}°C</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">FEELS LIKE</div>
+        <div style="font-size:16px;font-weight:700;">${w.feels_like}°C</div>
       </div>
-      <div style="background:var(--bg);border-radius:8px;padding:10px;">
-        <div style="font-size:11px;color:var(--muted);">HUMIDITY</div>
-        <div style="font-size:22px;font-weight:700;">${w.humidity}%</div>
-        <div style="font-size:11px;color:var(--muted);">Wind ${w.wind_speed} km/h</div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">HUMIDITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.humidity}%</div>
       </div>
-    </div>`;
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">WIND</div>
+        <div style="font-size:16px;font-weight:700;">${w.wind_speed} km/h</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">UV INDEX</div>
+        <div style="font-size:16px;font-weight:700;">${w.uv ?? '–'}</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">PRESSURE</div>
+        <div style="font-size:16px;font-weight:700;">${w.pressure ?? '–'} hPa</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">VISIBILITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.visibility ?? '–'} km</div>
+      </div>
+      ${w.aqi != null ? `
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">AIR QUALITY</div>
+        <div style="font-size:16px;font-weight:700;">${w.aqi}</div>
+      </div>` : ''}
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">SUNRISE</div>
+        <div style="font-size:14px;font-weight:700;">${w.sunrise ?? '–'}</div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:9px;text-align:center;">
+        <div style="font-size:10px;color:var(--muted);">SUNSET</div>
+        <div style="font-size:14px;font-weight:700;">${w.sunset ?? '–'}</div>
+      </div>
+    </div>
+
+    ${hourly ? `<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">HOURLY FORECAST</div>
+    <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:12px;">${hourly}</div>` : ''}
+
+    ${daily ? `<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">7-DAY FORECAST</div>
+    <div style="margin-bottom:6px;">${daily}</div>` : ''}
+  `;
   weatherResultEl2.style.display = 'block';
-  input.value = `${w.icon} Weather in ${w.location}: ${w.temp}°C, ${w.condition}. Humidity: ${w.humidity}%, Wind: ${w.wind_speed} km/h.`;
-  autoResize();
+  addRecentWeatherSearch(w.location);
+  renderRecentSearches();
 }
 
 async function fetchWeatherModal(payload) {
@@ -2183,8 +2342,8 @@ async function fetchWeatherModal(payload) {
     const r = await fetch('/api/weather',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const d = await r.json(); weatherLoadingEl2.style.display='none';
     if(d.weather) renderWeather(d.weather);
-    else { weatherErrorEl2.textContent=d.error||'Could not fetch weather.'; weatherErrorEl2.style.display='block'; }
-  } catch(e) { weatherLoadingEl2.style.display='none'; weatherErrorEl2.textContent='Error: '+e.message; weatherErrorEl2.style.display='block'; }
+    else { weatherErrorEl2.textContent=d.error||'Could not find that location. Try a different search.'; weatherErrorEl2.style.display='block'; }
+  } catch(e) { weatherLoadingEl2.style.display='none'; weatherErrorEl2.textContent='Network error: '+e.message; weatherErrorEl2.style.display='block'; }
   finally { weatherSearchBtn2.disabled=false; }
 }
 if (weatherSearchBtn2) weatherSearchBtn2.addEventListener('click', () => { const loc=weatherCityEl2.value.trim(); if(loc) fetchWeatherModal({location:loc}); });
@@ -2192,12 +2351,13 @@ if (weatherCityEl2) weatherCityEl2.addEventListener('keydown', e => { if(e.key==
 if (weatherCloseBtn2) weatherCloseBtn2.addEventListener('click', () => weatherModal2.style.display='none');
 if (weatherModal2) weatherModal2.addEventListener('click', e => { if(e.target===weatherModal2) weatherModal2.style.display='none'; });
 if (weatherLocBtn2) weatherLocBtn2.addEventListener('click', () => {
-  if (!navigator.geolocation) { alert('Geolocation not supported'); return; }
+  if (!navigator.geolocation) { weatherErrorEl2.textContent = 'Geolocation is not supported in this browser.'; weatherErrorEl2.style.display = 'block'; return; }
   navigator.geolocation.getCurrentPosition(
     pos => fetchWeatherModal({lat:pos.coords.latitude,lon:pos.coords.longitude}),
-    err => alert('Location error: '+err.message)
+    err => { weatherErrorEl2.textContent = 'Location error: ' + err.message; weatherErrorEl2.style.display = 'block'; }
   );
 });
+renderRecentSearches();
 </script>
 </body>
 </html>
@@ -2255,66 +2415,9 @@ def api_rename_conversation(conv_id):
     return jsonify({"status": "renamed", "title": new_title})
 
 
-def to_ollama_messages(gemini_messages, system_prompt):
-    """Convert our stored Gemini-style messages ({role, parts:[...]}) into
-    Ollama's chat format ({role, content, images?})."""
-    msgs = [{"role": "system", "content": system_prompt}]
-    for m in gemini_messages:
-        role = "user" if m["role"] == "user" else "assistant"
-        text = "".join(p.get("text", "") for p in m["parts"] if "text" in p)
-        entry = {"role": role, "content": text}
-        images = [
-            p["inline_data"]["data"]
-            for p in m["parts"]
-            if "inline_data" in p and p["inline_data"].get("mime_type", "").startswith("image/")
-        ]
-        if images:
-            entry["images"] = images
-        msgs.append(entry)
-    return msgs
-
-
-def ollama_stream_chunks(messages):
-    """Yields plain text increments from a local Ollama server."""
-    try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": True},
-            stream=True,
-            timeout=120,
-        )
-    except requests.RequestException as e:
-        yield (
-            f"[Could not reach Ollama at {OLLAMA_URL}: {e}. "
-            f"Make sure Ollama is installed and running (`ollama serve`), "
-            f"and that you've pulled the model (`ollama pull {OLLAMA_MODEL}`).]"
-        )
-        return
-
-    if resp.status_code != 200:
-        yield f"[Ollama error ({resp.status_code}): {resp.text}]"
-        return
-
-    for raw_line in resp.iter_lines(decode_unicode=True):
-        if not raw_line:
-            continue
-        try:
-            obj = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("error"):
-            yield f"[Ollama error: {obj['error']}]"
-            return
-        content = obj.get("message", {}).get("content", "")
-        if content:
-            yield content
-        if obj.get("done"):
-            break
-
-
 def to_openai_messages(gemini_messages, system_prompt):
     """Convert stored Gemini-format messages to OpenAI-compatible chat format.
-    Used by Groq, OpenRouter, and HuggingFace (all use the same OpenAI-style API)."""
+    Used by both Groq and Cerebras (both use the same OpenAI-style chat API)."""
     msgs = [{"role": "system", "content": system_prompt}]
     for m in gemini_messages:
         role = "user" if m["role"] == "user" else "assistant"
@@ -2323,238 +2426,90 @@ def to_openai_messages(gemini_messages, system_prompt):
     return msgs
 
 
-def groq_stream_chunks(messages):
-    """Stream from Groq API (OpenAI-compatible, very fast, generous free tier)."""
-    if not GROQ_API_KEY:
+def _openai_style_stream(url, api_key, model, messages, provider_label):
+    """Shared streaming logic for Groq/Cerebras (both are OpenAI-compatible).
+    Yields nothing at all on ANY failure (auth, rate limit, timeout, invalid
+    model, network error, 4xx/5xx) so the caller can silently fall through to
+    the next provider without ever exposing a provider error to the user."""
+    if not api_key:
         return
     try:
         resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages, "stream": True, "max_tokens": 2048},
             stream=True, timeout=60,
         )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content = obj["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return  # success — stop here
-        # rate limited or error — fall through (return without yielding)
     except requests.RequestException:
-        pass
+        return  # network error / timeout — silently fall through
 
-
-def openrouter_stream_chunks(messages):
-    """Stream from OpenRouter (aggregates many free models)."""
-    if not OPENROUTER_API_KEY:
-        return
-    try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json",
-                     "HTTP-Referer": "http://localhost:5000", "X-Title": "Ꮇʏᴛʜɪᴄ ᴀɪ"},
-            json={"model": OPENROUTER_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content_chunk = obj["choices"][0]["delta"].get("content", "")
-                    if content_chunk:
-                        yield content_chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[OpenRouter connection error: {e}]"
+    if resp.status_code != 200:
+        # rate limit (429), server error (5xx), invalid model, auth error, etc. —
+        # all mean "silently try the next provider", never shown to the user.
         return
 
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if data_str == "[DONE]":
+            break
+        try:
+            obj = json.loads(data_str)
+            content = obj["choices"][0]["delta"].get("content", "")
+            if content:
+                yield content
+        except (json.JSONDecodeError, KeyError, IndexError):
+            continue
 
-def huggingface_stream_chunks(messages):
-    """Stream from Hugging Face Inference API (free tier available)."""
-    if not HF_API_KEY:
-        return
-    # HF uses the same OpenAI-compatible endpoint format
-    try:
-        resp = requests.post(
-            f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"},
-            json={"model": HF_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    content_chunk = obj["choices"][0]["delta"].get("content", "")
-                    if content_chunk:
-                        yield content_chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[OpenRouter error {resp.status_code}: {resp.text[:200]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[OpenRouter connection error: {e}]"
-        return
 
+def groq_stream_chunks(messages):
+    """Stream from Groq (primary chat provider — fast, generous free tier)."""
+    yield from _openai_style_stream(
+        "https://api.groq.com/openai/v1/chat/completions",
+        GROQ_API_KEY, GROQ_MODEL, messages, "Groq",
+    )
 
 
 def cerebras_stream_chunks(messages):
-    """Stream from Cerebras AI (very fast, generous free tier, works on servers)."""
-    if not CEREBRAS_API_KEY:
-        return
-    try:
-        resp = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
-            json={"model": CEREBRAS_MODEL, "messages": messages, "stream": True, "max_tokens": 2048},
-            stream=True, timeout=60,
-        )
-        if resp.status_code == 200:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                    chunk = obj["choices"][0]["delta"].get("content", "")
-                    if chunk:
-                        yield chunk
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-            return
-        else:
-            yield f"[Cerebras error {resp.status_code}: {resp.text[:300]}]"
-            return
-    except requests.RequestException as e:
-        yield f"[Cerebras connection error: {e}]"
-        return
-
-
-# --- Round-robin provider rotation ------------------------------------------
-# Tracks which provider index to try FIRST next time (persists for the life
-# of the process; resets on server restart, which is fine).
-_provider_index = [0]
+    """Stream from Cerebras (automatic fallback if Groq is unavailable)."""
+    yield from _openai_style_stream(
+        "https://api.cerebras.ai/v1/chat/completions",
+        CEREBRAS_API_KEY, CEREBRAS_MODEL, messages, "Cerebras",
+    )
 
 
 def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
-    """True round-robin rotation across all configured providers.
-    No provider is primary — starts from wherever the last successful call left off.
-    If the current provider fails/is rate-limited, moves to the next one and
-    remembers that position for the next request too."""
+    """Groq first, Cerebras as a silent automatic fallback.
+    Never asks the user to pick a provider and never exposes provider errors —
+    if Groq yields nothing (rate limit, timeout, invalid model, network error,
+    4xx/5xx), we just move on to Cerebras with no visible interruption."""
     sp = system_prompt or SYSTEM_PROMPT
     openai_msgs = to_openai_messages(gemini_messages, sp)
-    ollama_msgs = to_ollama_messages(gemini_messages, sp)
 
-    # Build the full list of available providers (only those with keys)
-    all_providers = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
+    order = []
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
-        all_providers.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
+        order.append(("Groq", lambda: groq_stream_chunks(openai_msgs)))
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
-        all_providers.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
-    if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
-        all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
-    if PROVIDER == "huggingface" and HF_API_KEY:
-        # HuggingFace free tier blocks server IPs (Render etc) — only use if explicitly set
-        all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
-    if PROVIDER == "ollama":
-        all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
+        order.append(("Cerebras", lambda: cerebras_stream_chunks(openai_msgs)))
 
-    if not all_providers:
-        yield "[No AI providers configured. Add at least one API key.]"
+    if not order:
+        yield "I'm not able to respond right now — no AI provider is configured on the server."
         return
 
-    n = len(all_providers)
-    start = _provider_index[0] % n
-
-    # Try each provider starting from the current rotation position
-    for i in range(n):
-        idx = (start + i) % n
-        name, fn = all_providers[idx]
-        collected = []
+    for _name, fn in order:
+        collected = False
         try:
             for chunk in fn():
-                collected.append(chunk)
+                collected = True
                 yield chunk
             if collected:
-                # Success — next request starts from the NEXT provider (true rotation)
-                _provider_index[0] = (idx + 1) % n
                 return
         except Exception:
             pass
-        # This provider failed — silently try the next one
+        # silently move on to the next provider
 
-    yield "[All AI providers failed or are rate-limited. Try again in a moment.]"
-
-
-
-
-def gemini_stream_chunks(payload):
-    """Yields plain text increments from Gemini's SSE stream.
-    Returns nothing (silently) on auth/quota/rate-limit errors so the
-    round-robin rotation automatically falls through to the next provider."""
-    try:
-        resp = requests.post(
-            GEMINI_STREAM_URL,
-            params={"key": API_KEY, "alt": "sse"},
-            json=payload,
-            stream=True,
-            timeout=60,
-        )
-    except requests.RequestException:
-        return  # network error — silently fall through
-
-    if resp.status_code != 200:
-        # Auth errors (401/403), quota errors (429), and server errors (5xx)
-        # all mean "try the next provider" — don't yield anything.
-        return
-
-    for raw_line in resp.iter_lines(decode_unicode=True):
-        if not raw_line or not raw_line.startswith("data:"):
-            continue
-        data_str = raw_line[len("data:"):].strip()
-        if not data_str or data_str == "[DONE]":
-            continue
-        try:
-            obj = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
-        try:
-            for part in obj["candidates"][0]["content"]["parts"]:
-                if "text" in part:
-                    yield part["text"]
-        except (KeyError, IndexError):
-            continue
+    yield "I'm having trouble reaching the AI service right now — please try again in a moment."
 
 
 # --- Model selector (cosmetic tiers over the same underlying providers) -----
@@ -2594,6 +2549,175 @@ def api_vip_unlock():
         session.permanent = True
         return jsonify({"success": True})
     return jsonify({"success": False})
+
+
+# --- Weather (Open-Meteo — free, no API key needed, works for any country/city) ---
+_WMO_ICON = {
+    0: ("☀️", "Clear sky"), 1: ("🌤", "Mainly clear"), 2: ("⛅", "Partly cloudy"), 3: ("☁️", "Overcast"),
+    45: ("🌫", "Fog"), 48: ("🌫", "Freezing fog"),
+    51: ("🌦", "Light drizzle"), 53: ("🌦", "Drizzle"), 55: ("🌧", "Dense drizzle"),
+    56: ("🌧", "Freezing drizzle"), 57: ("🌧", "Freezing drizzle"),
+    61: ("🌧", "Light rain"), 63: ("🌧", "Rain"), 65: ("🌧", "Heavy rain"),
+    66: ("🌧", "Freezing rain"), 67: ("🌧", "Freezing rain"),
+    71: ("🌨", "Light snow"), 73: ("🌨", "Snow"), 75: ("❄️", "Heavy snow"), 77: ("❄️", "Snow grains"),
+    80: ("🌦", "Rain showers"), 81: ("🌧", "Rain showers"), 82: ("⛈", "Violent rain showers"),
+    85: ("🌨", "Snow showers"), 86: ("❄️", "Snow showers"),
+    95: ("⛈", "Thunderstorm"), 96: ("⛈", "Thunderstorm with hail"), 99: ("⛈", "Thunderstorm with hail"),
+}
+
+
+def _wmo(code):
+    return _WMO_ICON.get(code, ("🌡", "Unknown"))
+
+
+def _aqi_label(us_aqi):
+    if us_aqi is None:
+        return None
+    if us_aqi <= 50: return f"{us_aqi} (Good)"
+    if us_aqi <= 100: return f"{us_aqi} (Moderate)"
+    if us_aqi <= 150: return f"{us_aqi} (Unhealthy for sensitive groups)"
+    if us_aqi <= 200: return f"{us_aqi} (Unhealthy)"
+    if us_aqi <= 300: return f"{us_aqi} (Very unhealthy)"
+    return f"{us_aqi} (Hazardous)"
+
+
+@app.route("/api/weather", methods=["POST"])
+@login_required
+def api_weather():
+    data = request.get_json(force=True) or {}
+    location_name = (data.get("location") or "").strip()
+    lat = data.get("lat")
+    lon = data.get("lon")
+    display_name = location_name
+
+    try:
+        if lat is None or lon is None:
+            if not location_name:
+                return jsonify({"error": "Enter a city or use your location."}), 400
+            geo = requests.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location_name, "count": 1, "language": "en", "format": "json"},
+                timeout=10,
+            ).json()
+            results = geo.get("results") or []
+            if not results:
+                return jsonify({"error": f'Could not find "{location_name}".'}), 404
+            top = results[0]
+            lat, lon = top["latitude"], top["longitude"]
+            parts = [top.get("name")]
+            if top.get("admin1") and top.get("admin1") != top.get("name"):
+                parts.append(top["admin1"])
+            if top.get("country"):
+                parts.append(top["country"])
+            display_name = ", ".join(p for p in parts if p)
+
+        fr = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat, "longitude": lon,
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,"
+                           "wind_speed_10m,pressure_msl,visibility",
+                "hourly": "temperature_2m,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,uv_index_max,"
+                         "sunrise,sunset",
+                "timezone": "auto",
+                "forecast_days": 7,
+            },
+            timeout=10,
+        ).json()
+
+        current = fr.get("current", {})
+        hourly_raw = fr.get("hourly", {})
+        daily_raw = fr.get("daily", {})
+
+        # If reverse-geolocated (lat/lon only, no location_name given), try to label it nicely.
+        if not display_name:
+            try:
+                rev = requests.get(
+                    "https://geocoding-api.open-meteo.com/v1/reverse",
+                    params={"latitude": lat, "longitude": lon, "language": "en", "format": "json"},
+                    timeout=8,
+                ).json()
+                rr = (rev.get("results") or [None])[0]
+                if rr:
+                    display_name = ", ".join(p for p in [rr.get("name"), rr.get("country")] if p)
+            except Exception:
+                pass
+            display_name = display_name or f"{lat:.2f}, {lon:.2f}"
+
+        icon, condition = _wmo(current.get("weather_code"))
+
+        # Air quality (best-effort — not fatal if it fails)
+        aqi = None
+        try:
+            aq = requests.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={"latitude": lat, "longitude": lon, "current": "us_aqi"},
+                timeout=8,
+            ).json()
+            aqi = _aqi_label((aq.get("current") or {}).get("us_aqi"))
+        except Exception:
+            pass
+
+        # Next 8 hours, from "now" onward
+        hourly = []
+        times = hourly_raw.get("time", [])
+        temps = hourly_raw.get("temperature_2m", [])
+        codes = hourly_raw.get("weather_code", [])
+        now_iso = current.get("time", "")
+        start_idx = 0
+        for i, t in enumerate(times):
+            if t >= now_iso:
+                start_idx = i
+                break
+        for i in range(start_idx, min(start_idx + 8, len(times))):
+            hi, _ = _wmo(codes[i] if i < len(codes) else None)
+            hour_label = times[i][11:16] if len(times[i]) >= 16 else times[i]
+            hourly.append({"time": hour_label, "icon": hi, "temp": round(temps[i]) if i < len(temps) else None})
+
+        daily = []
+        d_times = daily_raw.get("time", [])
+        d_max = daily_raw.get("temperature_2m_max", [])
+        d_min = daily_raw.get("temperature_2m_min", [])
+        d_codes = daily_raw.get("weather_code", [])
+        weekday_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for i, t in enumerate(d_times):
+            try:
+                y, m, dd = [int(x) for x in t.split("-")]
+                import datetime as _dt
+                wd = weekday_names[_dt.date(y, m, dd).weekday()]
+            except Exception:
+                wd = t
+            di, _ = _wmo(d_codes[i] if i < len(d_codes) else None)
+            daily.append({
+                "day": "Today" if i == 0 else wd,
+                "icon": di,
+                "max": round(d_max[i]) if i < len(d_max) else None,
+                "min": round(d_min[i]) if i < len(d_min) else None,
+            })
+
+        weather = {
+            "location": display_name,
+            "icon": icon,
+            "condition": condition,
+            "temp": round(current.get("temperature_2m", 0)),
+            "feels_like": round(current.get("apparent_temperature", 0)),
+            "humidity": current.get("relative_humidity_2m"),
+            "wind_speed": round(current.get("wind_speed_10m", 0)),
+            "pressure": round(current.get("pressure_msl")) if current.get("pressure_msl") is not None else None,
+            "visibility": round((current.get("visibility") or 0) / 1000, 1) if current.get("visibility") is not None else None,
+            "uv": (daily_raw.get("uv_index_max") or [None])[0],
+            "sunrise": (daily_raw.get("sunrise") or [None])[0][11:16] if (daily_raw.get("sunrise") or [None])[0] else None,
+            "sunset": (daily_raw.get("sunset") or [None])[0][11:16] if (daily_raw.get("sunset") or [None])[0] else None,
+            "aqi": aqi,
+            "hourly": hourly,
+            "daily": daily,
+        }
+        return jsonify({"weather": weather})
+    except requests.RequestException as e:
+        return jsonify({"error": f"Weather service unavailable: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Could not process weather data: {e}"}), 500
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -2655,11 +2779,6 @@ def chat():
             user_entry["attachment_meta"] = attachment_meta
         messages.append(user_entry)
 
-    # Strip attachment_meta (frontend-only field) before sending to the model
-    gemini_contents = [
-        {"role": m["role"], "parts": m["parts"]} for m in messages
-    ]
-
     effective_system_prompt = SYSTEM_PROMPT
     if user_name:
         effective_system_prompt += (
@@ -2672,23 +2791,10 @@ def chat():
             " The user is on the VIP tier — feel free to go deeper and be more "
             "thorough than usual when it's helpful, without padding for its own sake."
         )
-    # Only the real Gemini call gets the "you have search" instruction — fallback
-    # providers don't have real search, so giving them that instruction makes them
-    # hallucinate fake tool-call JSON into the visible reply.
-    gemini_system_prompt = effective_system_prompt + GEMINI_SEARCH_ADDENDUM
-
-    payload = {
-        "contents": gemini_contents,
-        "systemInstruction": {"parts": [{"text": gemini_system_prompt}]},
-        "tools": [{"google_search": {}}],
-    }
 
     def generate():
         full_reply = []
-        if PROVIDER == "ollama":
-            chunk_source = ollama_stream_chunks(to_ollama_messages(messages, effective_system_prompt))
-        else:
-            chunk_source = auto_stream_chunks(payload, messages, effective_system_prompt)
+        chunk_source = auto_stream_chunks(None, messages, effective_system_prompt)
 
         for chunk in chunk_source:
             full_reply.append(chunk)
@@ -2772,23 +2878,15 @@ def generate_image():
 
 if __name__ == "__main__":
     active = []
-    if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
-        active.append(f"Gemini({GEMINI_MODEL})")
     if PROVIDER in ("auto", "groq") and GROQ_API_KEY:
         active.append(f"Groq({GROQ_MODEL})")
     if PROVIDER in ("auto", "cerebras") and CEREBRAS_API_KEY:
         active.append(f"Cerebras({CEREBRAS_MODEL})")
-    if PROVIDER in ("auto", "openrouter") and OPENROUTER_API_KEY:
-        active.append(f"OpenRouter({OPENROUTER_MODEL})")
-    if PROVIDER in ("auto", "huggingface") and HF_API_KEY:
-        active.append(f"HuggingFace({HF_MODEL})")
-    if PROVIDER == "ollama":
-        active.append(f"Ollama({OLLAMA_MODEL}@{OLLAMA_URL})")
     providers_str = " → ".join(active) if active else "none configured!"
     image_provider = "NanoBanana (image-to-image supported)" if NANO_BANANA_API_KEY else (
         "HuggingFace FLUX (text-to-image only)" if HF_API_KEY else "none configured!"
     )
     print(f"Starting Ꮇʏᴛʜɪᴄ ᴀɪ at http://localhost:5000")
-    print(f"Providers (fallback order): {providers_str}")
+    print(f"Providers (Groq primary, Cerebras fallback): {providers_str}")
     print(f"Image generation: {image_provider}")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
