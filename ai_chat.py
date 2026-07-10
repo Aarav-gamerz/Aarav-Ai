@@ -758,7 +758,7 @@ PAGE = r"""<!DOCTYPE html>
     <button id="scroll-btn" title="Scroll to bottom">↓</button>
 
     <div id="pending-attach">
-      📎 <span id="pending-attach-name"></span>
+      ＋ <span id="pending-attach-name"></span>
       <button id="pending-attach-remove">✕</button>
     </div>
 
@@ -1117,7 +1117,7 @@ function addMessage(role, text, attachment) {
   if (attachment) {
     const chip = document.createElement('div');
     chip.className = 'attach-chip';
-    chip.textContent = '📎 ' + attachment.name;
+    chip.textContent = '＋ ' + attachment.name;
     div.appendChild(chip);
     if (attachment.mimeType && attachment.mimeType.startsWith('image/') && attachment.dataBase64) {
       const img = document.createElement('img');
