@@ -24,8 +24,15 @@ Usage (Ollama — fully local, no API key or internet needed):
     4. python ai_chat.py
     5. Open http://localhost:5000 in your browser
 
+Email verification (OTP login via Resend):
+    Set these environment variables (e.g. on Render -> Environment):
+         RESEND_API_KEY = your Resend API key
+         RESEND_FROM    = "Mythic AI <noreply@mythicai.com>"   (must be on a VERIFIED domain)
+    Until mythicai.com is verified in https://resend.com/domains, Resend's
+    sandbox sender can only email your own Resend account address.
+
 Features:
-- Login/register (real accounts, hashed passwords, stored in chat_data/users.json)
+- Email + OTP login (no passwords — a 6-digit code is emailed via Resend)
 - Multi-conversation chat with sidebar, saved per-account, survives restarts
 - File/image upload (attach an image or text file to a message)
 - Web search grounding (Gemini can search Google for current info — Gemini only)
@@ -40,29 +47,26 @@ import uuid
 import time
 import base64
 import requests
+from pathlib import Path
 from flask import (
     Flask, request, jsonify, Response, session,
-    stream_with_context
+    stream_with_context, redirect
 )
 
 PROVIDER = os.environ.get("AI_PROVIDER", "auto").strip().lower()
-# "auto"        = round-robin: Groq → OpenRouter → HuggingFace (all work on servers)
+# "auto"        = round-robin: Groq -> OpenRouter -> HuggingFace (all work on servers)
 # "gemini"      = Google Gemini only (free tier only works locally, not on Render)
 # "groq"        = Groq only
 # "openrouter"  = OpenRouter only
 # "huggingface" = Hugging Face only
 # "ollama"      = local Ollama only
 
-# --- API Keys (hardcoded fallbacks — override via environment variables) ------
-# WARNING: don't commit a file with real keys to a public GitHub repo.
-# Set these as environment variables on Render instead.
 GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY",    "")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY",      "")
 CEREBRAS_API_KEY  = os.environ.get("CEREBRAS_API_KEY",  "")
 OPENROUTER_API_KEY= os.environ.get("OPENROUTER_API_KEY","")
 HF_API_KEY        = os.environ.get("HF_API_KEY",        "")
 
-# --- Model names -------------------------------------------------------------
 GEMINI_MODEL      = "gemini-2.5-flash"
 GROQ_MODEL        = os.environ.get("GROQ_MODEL",        "llama-3.1-8b-instant")
 OPENROUTER_MODEL  = os.environ.get("OPENROUTER_MODEL",  "google/gemma-3-4b-it:free")
@@ -75,48 +79,47 @@ GEMINI_STREAM_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:streamGenerateContent"
 )
 
-# keep old name for compatibility with existing references below
 API_KEY = GEMINI_API_KEY
 MODEL   = GEMINI_MODEL
 SYSTEM_PROMPT = (
     "You are Mythic AI, a smart and friendly AI assistant made by Aarav Singh. "
-    "If asked who made you, say you are Mythic AI made by Aarav Singh — say it once naturally, never repeat it unprompted. "
+    "If asked who made you, say you are Mythic AI made by Aarav Singh - say it once naturally, never repeat it unprompted. "
     "Never mention Google, Groq, OpenRouter, HuggingFace, Meta, Mistral, Anthropic, or any AI company as your creator or backend. "
     "You can help with anything: questions, writing, coding, math, ideas, or just chatting. "
     "When writing code, always wrap it in markdown code blocks with the language name. "
-    "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in — "
+    "LANGUAGE: Always reply ENTIRELY in the same language the user's message is written in - "
     "never mix two languages in a single reply. If they write in Hindi, reply fully in Hindi. "
     "If they write in English, reply fully in English (do not slip into Hindi or any other language "
-    "partway through, even if source information you know is in a different language — translate it "
+    "partway through, even if source information you know is in a different language - translate it "
     "into the reply language first). If they mix languages themselves, match their mix. "
     "Never force English on the user. "
-    "TOOL USE: Never write out fake tool calls, function names, or JSON like {\"query\": ...} in your reply — "
+    "TOOL USE: Never write out fake tool calls, function names, or JSON like {\"query\": ...} in your reply - "
     "those are internal mechanisms the user must never see. If you don't actually have live web access, "
     "just answer from what you know and say your information may not be fully up to date, instead of "
     "pretending to search. "
-    "ANTI-REPETITION RULES — follow strictly every reply: "
+    "ANTI-REPETITION RULES - follow strictly every reply: "
     "1. NEVER restate or echo back what the user just said. Jump straight to the answer. "
     "2. NEVER start replies with filler like Great question, Sure, Of course, Absolutely, Certainly. "
     "3. NEVER repeat information already given earlier in the conversation. Build on it. "
-    "4. Be direct and natural — like a knowledgeable friend, not a customer service bot. "
+    "4. Be direct and natural - like a knowledgeable friend, not a customer service bot. "
     "5. Keep answers concise unless the user asks for detail."
 )
 
-# Extra instruction appended ONLY for Gemini, which actually has a real google_search tool wired up.
-# Other providers (Groq/Cerebras/OpenRouter/HF/Ollama) have no real search access, so telling them
-# "you have search" makes them hallucinate fake tool-call JSON into the visible reply — hence this
-# is kept separate from the base SYSTEM_PROMPT above.
 GEMINI_SEARCH_ADDENDUM = (
     " WEB SEARCH: You have access to Google Search. When the user asks about current events, "
     "live prices, news, sports scores, weather, or anything that needs up-to-date information, "
     "use the search tool to find the answer. Do not say you cannot search the web. When you use "
-    "search results, translate/summarize them into the reply language — never paste a mix of languages."
+    "search results, translate/summarize them into the reply language - never paste a mix of languages."
 )
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me-" + str(uuid.uuid4()))
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
+
+# --- Base data directory (used by auth storage and, as a fallback, conversation storage) ---
+DATA_DIR = Path(__file__).resolve().parent / "chat_data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Supabase config ---------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -138,9 +141,13 @@ def sb(path):
 import hashlib, secrets, time as _time
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "re_e7rAaTUK_Bue5bvRkSzcursftpQM3uaLM")
-RESEND_FROM    = os.environ.get("RESEND_FROM", "Mythic AI <onboarding@resend.dev>")
+# NOTE: mythicai.com must be verified at https://resend.com/domains before this
+# "from" address will deliver to anyone other than your own Resend account email.
+RESEND_FROM    = os.environ.get("RESEND_FROM", "Mythic AI <noreply@mythicai.com>")
 AUTH_FILE      = DATA_DIR / "auth.json"
 OTP_EXPIRY     = 600  # 10 minutes
+OTP_RESEND_COOLDOWN = 30  # seconds between resend requests per email
+MAX_OTP_ATTEMPTS = 5  # wrong-code attempts allowed before the code is invalidated
 
 def _load_auth():
     if AUTH_FILE.exists():
@@ -152,7 +159,10 @@ def _save_auth(data):
     AUTH_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def send_otp_email(email, otp):
-    """Send OTP via Resend API."""
+    """Send OTP via Resend API. Returns True on success, False otherwise."""
+    if not RESEND_API_KEY:
+        print("[Resend] No RESEND_API_KEY configured - cannot send OTP email.")
+        return False
     try:
         r = requests.post("https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
@@ -174,8 +184,12 @@ def send_otp_email(email, otp):
   <p style="color:#8e8ea0;font-size:12px;text-align:center;margin-top:24px;">If you didn't request this, ignore this email.</p>
 </div>""",
             }, timeout=10)
-        return r.status_code == 200
-    except:
+        if r.status_code == 200:
+            return True
+        print(f"[Resend] send failed ({r.status_code}): {r.text[:300]}")
+        return False
+    except Exception as e:
+        print(f"[Resend] exception: {e}")
         return False
 
 def current_username():
@@ -198,7 +212,7 @@ AUTH_PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#10a37f">
-<title>Mythic AI — Sign In</title>
+<title>Mythic AI - Sign In</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{background:#1a1a1a;color:#ececec;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -239,7 +253,6 @@ AUTH_PAGE = r"""<!DOCTYPE html>
   <h1>Mythic AI</h1>
   <p class="sub">Sign in to continue</p>
 
-  <!-- Step 1: Email -->
   <div class="step active" id="step-email">
     <label for="email-in">Email address</label>
     <input type="email" id="email-in" placeholder="you@example.com" autocomplete="email">
@@ -247,7 +260,6 @@ AUTH_PAGE = r"""<!DOCTYPE html>
     <button class="btn" id="send-otp-btn">Continue</button>
   </div>
 
-  <!-- Step 2: OTP -->
   <div class="step" id="step-otp">
     <div class="email-show" id="email-show"></div>
     <label>Enter the 6-digit code we sent you</label>
@@ -260,11 +272,11 @@ AUTH_PAGE = r"""<!DOCTYPE html>
       <input type="text" maxlength="1" class="otp-digit" inputmode="numeric">
     </div>
     <div class="error" id="otp-err"></div>
-    <button class="btn" id="verify-btn">Verify & Sign In</button>
+    <button class="btn" id="verify-btn">Verify &amp; Sign In</button>
     <div class="resend-row">
       Didn't receive it? <button id="resend-btn" disabled>Resend (<span id="resend-timer">60</span>s)</button>
     </div>
-    <button class="btn btn-ghost" id="back-btn">← Change email</button>
+    <button class="btn btn-ghost" id="back-btn">Change email</button>
   </div>
 </div>
 <script>
@@ -307,7 +319,7 @@ async function sendOTP(email) {
     const d = await r.json();
     if (d.ok) {
       currentEmail = email;
-      emailShow.textContent = '📧 Code sent to ' + email;
+      emailShow.textContent = 'Code sent to ' + email;
       stepEmail.classList.remove('active');
       stepOtp.classList.add('active');
       otpDigits[0].focus();
@@ -326,7 +338,6 @@ sendBtn.addEventListener('click', () => {
 });
 emailIn.addEventListener('keydown', e => { if(e.key==='Enter') sendBtn.click(); });
 
-// OTP digit inputs — auto-advance
 otpDigits.forEach((d, i) => {
   d.addEventListener('input', () => {
     d.value = d.value.replace(/\D/g,'');
@@ -382,14 +393,11 @@ backBtn.addEventListener('click', () => {
 </html>
 """
 
-# --- Auth routes --------------------------------------------------------------
-
 @app.route("/login")
 def login_page():
     if current_username():
         return redirect("/")
-    from flask import Response as _R
-    return _R(AUTH_PAGE, mimetype="text/html; charset=utf-8")
+    return Response(AUTH_PAGE, mimetype="text/html; charset=utf-8")
 
 @app.route("/logout")
 def logout():
@@ -400,18 +408,29 @@ def logout():
 def auth_send_otp():
     d = request.get_json(force=True) or {}
     email = (d.get("email") or "").strip().lower()
-    if not email or "@" not in email:
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
         return jsonify({"ok": False, "error": "Invalid email"})
-    otp = str(secrets.randbelow(900000) + 100000)  # 6-digit OTP
+
     auth = _load_auth()
-    auth["otps"][email] = {"otp": hashlib.sha256(otp.encode()).hexdigest(), "expires": _time.time() + OTP_EXPIRY}
+    existing = auth["otps"].get(email)
+    now = _time.time()
+    if existing and now < existing.get("sent_at", 0) + OTP_RESEND_COOLDOWN:
+        wait = int(existing["sent_at"] + OTP_RESEND_COOLDOWN - now)
+        return jsonify({"ok": False, "error": f"Please wait {wait}s before requesting another code."})
+
+    otp = str(secrets.randbelow(900000) + 100000)  # 6-digit OTP
+    auth["otps"][email] = {
+        "otp": hashlib.sha256(otp.encode()).hexdigest(),
+        "expires": now + OTP_EXPIRY,
+        "sent_at": now,
+        "attempts": 0,
+    }
     _save_auth(auth)
     ok = send_otp_email(email, otp)
     if not ok:
-        # In dev: return OTP in response for testing
         if os.environ.get("FLASK_ENV") == "development":
             return jsonify({"ok": True, "dev_otp": otp})
-        return jsonify({"ok": False, "error": "Failed to send email. Check Resend API key."})
+        return jsonify({"ok": False, "error": "Failed to send email. Check the Resend API key/from address."})
     return jsonify({"ok": True})
 
 @app.route("/api/auth/verify-otp", methods=["POST"])
@@ -429,8 +448,12 @@ def auth_verify_otp():
         del auth["otps"][email]; _save_auth(auth)
         return jsonify({"ok": False, "error": "Code expired. Request a new one."})
     if hashlib.sha256(otp.encode()).hexdigest() != entry["otp"]:
+        entry["attempts"] = entry.get("attempts", 0) + 1
+        if entry["attempts"] >= MAX_OTP_ATTEMPTS:
+            del auth["otps"][email]; _save_auth(auth)
+            return jsonify({"ok": False, "error": "Too many wrong attempts. Request a new code."})
+        _save_auth(auth)
         return jsonify({"ok": False, "error": "Incorrect code. Try again."})
-    # Valid — log in
     del auth["otps"][email]
     if email not in auth["users"]:
         auth["users"][email] = {"created": _time.time()}
@@ -446,10 +469,6 @@ def auth_me():
         return jsonify({"logged_in": False})
     return jsonify({"logged_in": True, "email": email})
 
-
-
-
-# --- Supabase / file storage helpers ----------------------------------------
 
 def list_conversations(username):
     if not SUPABASE_URL:
@@ -524,7 +543,6 @@ def delete_conversation(username, conv_id):
         pass
 
 
-# --- Local file fallbacks for when Supabase is not configured ----------------
 import os as _os
 _BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
 _DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
@@ -576,7 +594,7 @@ def _delete_conversation_file(username, conv_id):
 
 def make_title(first_message):
     title = (first_message or "Attachment").strip().replace("\n", " ")
-    return title[:40] + ("…" if len(title) > 40 else "")
+    return title[:40] + ("..." if len(title) > 40 else "")
 
 
 # --- HTML pages ----------------------------------------------------------
@@ -591,7 +609,7 @@ PAGE = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Mythic AI">
-<meta name="description" content="Mythic AI — Smart AI assistant by Aarav Singh">
+<meta name="description" content="Mythic AI - Smart AI assistant by Aarav Singh">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="manifest" href="/manifest.json">
 <title>Mythic AI</title>
@@ -606,8 +624,6 @@ PAGE = r"""<!DOCTYPE html>
   html,body { height:100%; background:var(--bg); color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif; overflow:hidden; }
   .layout { display:flex; height:100vh; }
-
-  /* Sidebar */
   #sidebar { width:var(--sidebar-w); flex-shrink:0; background:var(--panel);
     border-right:1px solid var(--border); display:flex; flex-direction:column;
     transition:margin-left .2s ease; }
@@ -630,8 +646,6 @@ PAGE = r"""<!DOCTYPE html>
   .conv-item .rename-btn:hover { color:var(--accent); }
   .conv-item .del-btn:hover { color:#ef4444; }
   #sidebar-footer { padding:12px; font-size:11px; color:var(--muted); border-top:1px solid var(--border); }
-
-  /* Main */
   .app { display:flex; flex-direction:column; height:100vh; flex:1; min-width:0; }
   header { padding:calc(14px + env(safe-area-inset-top)) 20px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; justify-content:space-between; gap:10px;
@@ -651,9 +665,6 @@ PAGE = r"""<!DOCTYPE html>
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
   #export-btn:hover { background:var(--panel); }
-
-  /* Fullscreen bar — sits above the input row so it's always reachable on mobile,
-     away from any notch/status-bar area that can swallow top-corner taps. */
   #settings-btn { background:none; border:1px solid var(--border); color:var(--muted);
     width:36px; height:36px; border-radius:6px; cursor:pointer; font-size:15px; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; touch-action:manipulation; }
@@ -664,14 +675,9 @@ PAGE = r"""<!DOCTYPE html>
   #fullscreen-btn:hover { color:var(--text); border-color:var(--accent); }
   #fullscreen-btn.active { color:var(--accent); border-color:var(--accent); }
   #fullscreen-icon { font-size:15px; }
-
-  /* Fallback for browsers without a real Fullscreen API (iOS Safari, some in-app webviews):
-     hide the sidebar toggle/header chrome so the chat fills the screen. */
   body.pseudo-fullscreen #sidebar-toggle,
   body.pseudo-fullscreen header .left h1 { display:none; }
   body.pseudo-fullscreen header { padding-top:calc(6px + env(safe-area-inset-top)); padding-bottom:6px; }
-
-  /* Name modal */
   #name-modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
     z-index:200; align-items:center; justify-content:center; }
   #name-modal-overlay.show { display:flex; }
@@ -692,8 +698,6 @@ PAGE = r"""<!DOCTYPE html>
   #clear-btn { background:none; border:1px solid var(--border); color:var(--muted);
     font-size:12px; padding:6px 12px; border-radius:6px; cursor:pointer; flex-shrink:0; }
   #clear-btn:hover { background:var(--panel); }
-
-  /* Messages */
   #messages-wrap { flex:1; overflow-y:auto; position:relative; }
   #messages { padding:24px 20px; display:flex; flex-direction:column; gap:16px;
     max-width:760px; margin:0 auto; width:100%; min-height:100%; }
@@ -707,8 +711,6 @@ PAGE = r"""<!DOCTYPE html>
     color:#dc2626; font-size:13px; border-radius:10px; }
   .msg img { max-width:100%; border-radius:10px; display:block; margin-top:8px; }
   .attach-chip { font-size:11.5px; opacity:.75; margin-bottom:4px; }
-
-  /* Message row wraps the bubble + its action buttons (copy / regenerate) */
   .msg-row { display:flex; flex-direction:column; max-width:80%; }
   .msg-row.user { align-self:flex-end; align-items:flex-end; }
   .msg-row.ai { align-self:flex-start; align-items:flex-start; }
@@ -732,18 +734,12 @@ PAGE = r"""<!DOCTYPE html>
   .typing span:nth-child(2) { animation-delay:.2s; }
   .typing span:nth-child(3) { animation-delay:.4s; }
   @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
-
-  /* Scroll to bottom */
   #scroll-btn { position:fixed; bottom:130px; right:24px; width:36px; height:36px;
     border-radius:50%; background:var(--accent); color:#fff; border:none; cursor:pointer;
     font-size:18px; display:none; align-items:center; justify-content:center;
     box-shadow:0 2px 8px rgba(0,0,0,.15); z-index:10; }
   #scroll-btn.show { display:flex; }
-
-  /* Image preview */
   .gen-img { max-width:320px; border-radius:12px; display:block; margin-top:8px; }
-
-  /* Input area */
   #pending-attach { max-width:760px; margin:0 auto; width:100%; padding:6px 20px 0;
     display:none; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
   #pending-attach.show { display:flex; }
@@ -772,8 +768,6 @@ PAGE = r"""<!DOCTYPE html>
   #send-btn.generating:hover { opacity:.9; }
   #voice-btn.listening { color:#ef4444; animation:pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-
-  /* Speaking indicator */
   #speaking-indicator { display:none; align-items:center; gap:6px; font-size:12px;
     color:var(--accent); padding:4px 0; }
   #speaking-indicator.show { display:flex; }
@@ -783,29 +777,20 @@ PAGE = r"""<!DOCTYPE html>
     font-size:12.5px; padding:6px 14px; border-radius:20px; cursor:pointer;
     transition:all .15s ease; white-space:nowrap; font-family:inherit; touch-action:manipulation; }
   .quick-btn:hover { background:var(--accent-dim); border-color:var(--accent); color:var(--accent); }
-
   #messages-wrap::-webkit-scrollbar, #conv-list::-webkit-scrollbar { width:6px; }
   #messages-wrap::-webkit-scrollbar-thumb, #conv-list::-webkit-scrollbar-thumb
     { background:var(--border); border-radius:4px; }
   #sidebar-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
     z-index:99; -webkit-tap-highlight-color:transparent; }
-
   @media(max-width:768px) {
     :root { --sidebar-w: 78vw; }
-
-    /* Sidebar slides in as overlay — never pushes content */
     #sidebar { position:fixed; top:0; left:0; z-index:100; height:100%;
       height:-webkit-fill-available; width:var(--sidebar-w) !important;
       transform:translateX(0); transition:transform .25s ease;
       box-shadow:4px 0 24px rgba(0,0,0,.5); }
     #sidebar.hidden { transform:translateX(-105%); margin-left:0 !important; }
-
-    /* Show overlay when sidebar open */
     #sidebar-overlay { display:block; }
-
-    /* Main app always takes full width */
     .app { width:100% !important; flex:1; }
-
     header { padding:calc(10px + env(safe-area-inset-top)) 12px 10px; }
     header h1 { font-size:14px; }
     #sidebar-toggle { width:38px; height:38px; font-size:14px; }
@@ -814,31 +799,26 @@ PAGE = r"""<!DOCTYPE html>
     #clear-btn { font-size:11px; padding:8px 10px; min-height:38px; }
     #speak-toggle { font-size:11px; padding:5px 8px; }
     #fullscreen-btn { font-size:12.5px; padding:10px 12px; }
-
     #messages-wrap { overflow-y:auto; -webkit-overflow-scrolling:touch; }
     #messages { padding:14px 10px; gap:12px; max-width:100%; }
     .msg { max-width:90%; font-size:14px; padding:10px 12px; }
     .msg-row { max-width:90%; }
-    .msg-actions { opacity:1; height:26px; } /* no hover on touch — keep always visible */
+    .msg-actions { opacity:1; height:26px; }
     .msg-actions button { font-size:13px; padding:4px 9px; min-width:30px; min-height:26px; }
-
     .input-area { padding:8px 10px max(10px,env(safe-area-inset-bottom)); }
     .input-row { padding:6px 8px; }
-    textarea { font-size:16px; } /* 16px prevents iOS zoom */
+    textarea { font-size:16px; }
     .tool-btn { width:34px; height:34px; font-size:17px; }
     #send-btn { width:34px; height:34px; font-size:16px; }
-
     .empty-state h2 { font-size:19px; }
     .empty-state p { font-size:13px; }
     #scroll-btn { bottom:80px; right:12px; width:34px; height:34px; }
-
     #new-chat-btn { margin:10px; padding:10px 12px; font-size:13.5px; }
     .conv-item { padding:10px 8px; font-size:13px; min-height:44px; }
     .conv-item .rename-btn { opacity:1; }
     .conv-item .del-btn { opacity:1; }
     #sidebar-footer { font-size:11px; padding:10px 12px; }
   }
-
   @media(max-width:380px) {
     :root { --sidebar-w: 88vw; }
     .msg { font-size:13.5px; }
@@ -858,7 +838,7 @@ PAGE = r"""<!DOCTYPE html>
   <div class="app">
     <header>
       <div class="left">
-        <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
+        <button id="sidebar-toggle" title="Toggle sidebar">&#9776;</button>
         <h1>Mythic AI</h1>
         <select id="model-select" title="Select model" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer;outline:none;max-width:130px;font-family:inherit;">
           <option value="aarav-1.0">Mythic 1</option>
@@ -901,7 +881,6 @@ PAGE = r"""<!DOCTYPE html>
       <button id="stop-speak-btn">Stop</button>
     </div>
 
-    <!-- Quick action buttons -->
     <div id="quick-actions" style="display:flex;gap:8px;padding:6px 20px 0;max-width:760px;margin:0 auto;width:100%;flex-wrap:wrap;">
       <button class="quick-btn" id="img-gen-btn">🎨 Image</button>
       <button class="quick-btn" id="ghibli-btn">🌿 Ghibli Me</button>
@@ -909,19 +888,14 @@ PAGE = r"""<!DOCTYPE html>
       <button class="quick-btn" id="weather-btn">🌤 Weather</button>
       <button class="quick-btn" id="search-btn">🔍 Search</button>
     </div>
-      <button id="fullscreen-btn" type="button">
-        <span id="fullscreen-icon">⛶</span> <span id="fullscreen-label">Fullscreen</span>
-      </button>
       <form id="chat-form">
         <div class="input-row">
-          <!-- Attach file -->
           <input type="file" id="file-input" accept="image/*,.txt,.md,.csv,.json,.pdf" style="display:none">
           <button class="tool-btn" id="attach-btn" type="button" title="Attach file">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
             </svg>
           </button>
-          <!-- Camera -->
           <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none">
           <button class="tool-btn" id="camera-btn" type="button" title="Take photo">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -930,7 +904,6 @@ PAGE = r"""<!DOCTYPE html>
             </svg>
           </button>
           <textarea id="input" rows="1" placeholder="Message Mythic AI..."></textarea>
-          <!-- Voice input -->
           <button class="tool-btn" id="voice-btn" type="button" title="Voice input">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -953,7 +926,7 @@ PAGE = r"""<!DOCTYPE html>
 <div id="name-modal-overlay">
   <div id="name-modal">
     <h3>What should Mythic AI call you?</h3>
-    <p>Enter your preferred name — Mythic AI will use it when it talks to you.</p>
+    <p>Enter your preferred name - Mythic AI will use it when it talks to you.</p>
     <input type="text" id="name-input" maxlength="60" placeholder="e.g. Aarav" autocomplete="off">
     <div id="name-modal-actions">
       <button id="name-cancel-btn" type="button">Cancel</button>
@@ -962,26 +935,19 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Ghibli Selfie Modal -->
 <div id="ghibli-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:300;align-items:center;justify-content:center;">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;width:92%;max-width:440px;max-height:90vh;overflow-y:auto;">
     <h3 style="margin:0 0 4px;font-size:18px;">🌿 Ghibli Me</h3>
     <p style="color:var(--muted);font-size:13px;margin:0 0 16px;">Upload your photo and get a Studio Ghibli-style version of yourself</p>
-
-    <!-- Upload area -->
     <div id="ghibli-upload-area" style="border:2px dashed var(--border);border-radius:12px;padding:24px;text-align:center;cursor:pointer;margin-bottom:12px;transition:border-color .2s;">
       <div style="font-size:36px;margin-bottom:8px;">📸</div>
-      <div style="font-size:13px;color:var(--muted);">Click to upload your photo<br><span style="font-size:11px;">or drag & drop</span></div>
+      <div style="font-size:13px;color:var(--muted);">Click to upload your photo<br><span style="font-size:11px;">or drag &amp; drop</span></div>
       <input type="file" id="ghibli-file-input" accept="image/*" style="display:none">
     </div>
-
-    <!-- Preview -->
     <div id="ghibli-preview-wrap" style="display:none;margin-bottom:12px;text-align:center;">
       <img id="ghibli-preview" style="max-width:100%;max-height:180px;border-radius:10px;border:2px solid var(--accent);">
       <div style="font-size:11px;color:var(--muted);margin-top:4px;">Your photo ✓</div>
     </div>
-
-    <!-- Style options -->
     <div style="margin-bottom:12px;">
       <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">Ghibli Style:</label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
@@ -991,12 +957,8 @@ PAGE = r"""<!DOCTYPE html>
         <button class="ghibli-style-btn" data-style="Studio Ghibli portrait, Princess Mononoke style, nature anime art" style="padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;font-family:inherit;">🐺 Mononoke</button>
       </div>
     </div>
-
-    <!-- Extra prompt -->
     <input id="ghibli-extra" type="text" placeholder="Add details (optional): e.g. forest background, sunset..."
       style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;">
-
-    <!-- Result -->
     <div id="ghibli-result-wrap" style="display:none;margin-bottom:12px;text-align:center;">
       <img id="ghibli-result" style="max-width:100%;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.4);">
       <button id="ghibli-download-btn" style="margin-top:8px;background:var(--accent);color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;font-family:inherit;">⬇ Download</button>
@@ -1006,7 +968,6 @@ PAGE = r"""<!DOCTYPE html>
       <div style="color:var(--muted);font-size:13px;">Creating your Ghibli portrait...<br><span style="font-size:11px;">This takes 15-30 seconds</span></div>
     </div>
     <div id="ghibli-error" style="display:none;color:#ef4444;font-size:12px;margin-bottom:8px;padding:8px;background:#fef2f2;border-radius:6px;"></div>
-
     <div style="display:flex;gap:8px;">
       <button id="ghibli-generate-btn" style="flex:1;background:linear-gradient(135deg,#10a37f,#0d7a5f);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">✨ Create Ghibli Art</button>
       <button id="ghibli-close-btn" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:12px 16px;font-size:14px;cursor:pointer;">✕</button>
@@ -1030,6 +991,7 @@ const modelSelect   = document.getElementById('model-select');
 
 let selectedModel = 'aarav-2.5';
 let vipUnlocked   = false;
+let newsContext    = null;
 
 function showVipModal() {
   const existing = document.getElementById('vip-modal-overlay');
@@ -1060,7 +1022,6 @@ function showVipModal() {
   pwIn.addEventListener('keydown',e=>{if(e.key==='Enter')overlay.querySelector('#vip-pw-ok').click();});
 }
 
-// Load models from API
 (async()=>{
   try{
     const[mr,vr]=await Promise.all([fetch('/api/models').then(r=>r.json()),fetch('/api/vip-status').then(r=>r.json())]);
@@ -1106,7 +1067,6 @@ let pendingFile  = null;
 let recognition  = null;
 let currentUtterance = null;
 
-// --- Scroll button ---
 messagesWrap.addEventListener('scroll', () => {
   const nearBottom = messagesWrap.scrollHeight - messagesWrap.scrollTop - messagesWrap.clientHeight < 120;
   scrollBtn.classList.toggle('show', !nearBottom);
@@ -1229,7 +1189,6 @@ function hideTyping() {
   if (el) el.remove();
 }
 
-// --- Text-to-speech ---
 function speak(text) {
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -1247,7 +1206,6 @@ stopSpeakBtn.addEventListener('click', () => {
   speakingIndicator.classList.remove('show');
 });
 
-// --- Voice input ---
 function setupVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { voiceBtn.title = 'Voice not supported in this browser'; return; }
@@ -1278,7 +1236,6 @@ voiceBtn.addEventListener('click', () => {
   recognition.start();
 });
 
-// --- File / camera attach ---
 function handleFileSelect(file) {
   if (!file) return;
   const reader = new FileReader();
@@ -1302,7 +1259,6 @@ pendingRemove.addEventListener('click', () => {
   pendingAttach.classList.remove('show');
 });
 
-// --- Image generation detection ---
 const IMAGE_KEYWORDS = /\b(generate|create|draw|make|paint|render|show me|ghibli|anime|realistic|cartoon|portrait|landscape|art|artwork|image of|picture of|photo of|illustration)\b/i;
 async function tryGenerateImage(prompt) {
   try {
@@ -1320,7 +1276,6 @@ async function tryGenerateImage(prompt) {
   return false;
 }
 
-// --- Conversations ---
 async function loadConversationList() {
   try {
     const r = await fetch('/api/conversations');
@@ -1380,7 +1335,6 @@ function startNewChat() {
   loadConversationList();
 }
 
-// --- Send / regenerate / stop ---
 let isGenerating = false;
 let currentAbortController = null;
 
@@ -1398,7 +1352,6 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   setGenerating(true);
   currentAbortController = new AbortController();
 
-  // Check if user wants an image (only on fresh sends, not regenerate)
   if (!regenerate) {
     const wantsImage = IMAGE_KEYWORDS.test(message || '') && !attachment;
     if (wantsImage) {
@@ -1452,7 +1405,6 @@ async function streamReply({ message = null, attachment = null, regenerate = fal
   } catch (err) {
     hideTyping();
     if (err.name === 'AbortError') {
-      // User hit stop — keep whatever text streamed in so far, just mark it as stopped.
       if (aiTextNode && !aiTextNode.textContent.trim()) aiTextNode.textContent = '[Stopped]';
     } else {
       addMessage('error', 'Network error: ' + err.message);
@@ -1499,6 +1451,10 @@ input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 140) + 'px';
 });
+function autoResize() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+}
 
 const sidebarOverlay = document.getElementById('sidebar-overlay');
 
@@ -1517,10 +1473,7 @@ sidebarToggle.addEventListener('click', () => {
 });
 sidebarOverlay.addEventListener('click', closeSidebar);
 
-// Fullscreen toggle (works on Android/desktop; iOS Safari has no real Fullscreen API,
-// so it falls back to a "pseudo-fullscreen" mode that maximizes the app view instead)
 const fullscreenIcon  = document.getElementById('fullscreen-icon');
-const fullscreenLabel = document.getElementById('fullscreen-label');
 const fsSupported = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen);
 
 function isFullscreen() {
@@ -1530,11 +1483,9 @@ function isFullscreen() {
 function updateFullscreenBtn() {
   if (isFullscreen()) {
     fullscreenIcon.textContent = '⤢';
-    fullscreenLabel.textContent = 'Exit fullscreen';
     fullscreenBtn.classList.add('active');
   } else {
     fullscreenIcon.textContent = '⛶';
-    fullscreenLabel.textContent = 'Fullscreen';
     fullscreenBtn.classList.remove('active');
   }
 }
@@ -1550,14 +1501,11 @@ async function toggleFullscreen() {
         else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
       }
     } else {
-      // iOS Safari / in-app browsers: real Fullscreen API isn't available,
-      // so just maximize the app view (hides scroll bounce, fills the screen).
       document.body.classList.toggle('pseudo-fullscreen');
       updateFullscreenBtn();
     }
   } catch (err) {
     console.warn('Fullscreen request failed:', err);
-    // Even on failure, fall back to pseudo-fullscreen so the button still does something
     document.body.classList.toggle('pseudo-fullscreen');
     updateFullscreenBtn();
   }
@@ -1566,7 +1514,6 @@ fullscreenBtn.addEventListener('click', toggleFullscreen);
 document.addEventListener('fullscreenchange', updateFullscreenBtn);
 document.addEventListener('webkitfullscreenchange', updateFullscreenBtn);
 
-// "What should Mythic AI call you?" — stored locally, sent with every chat request
 function getUserName() { return localStorage.getItem('mythic_user_name') || ''; }
 function setUserName(name) {
   if (name) localStorage.setItem('mythic_user_name', name);
@@ -1589,13 +1536,11 @@ nameInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); nameSaveBtn.click(); }
   else if (e.key === 'Escape') closeNameModal();
 });
-// First-time visitors get a gentle one-time prompt
 if (!localStorage.getItem('mythic_name_prompted')) {
   localStorage.setItem('mythic_name_prompted', '1');
   setTimeout(openNameModal, 600);
 }
 
-// Hide sidebar by default on mobile
 if (isMobile()) sidebar.classList.add('hidden');
 newChatBtn.addEventListener('click', startNewChat);
 clearBtn.addEventListener('click', async () => {
@@ -1630,7 +1575,157 @@ exportBtn.addEventListener('click', async () => {
   }
 });
 
-// Initial load
+(async () => {
+  const convs = await loadConversationList();
+  if (convs.length > 0) openConversation(convs[0].id);
+  else showEmptyState();
+})();
+
+const imgGenBtn   = document.getElementById('img-gen-btn');
+const ghibliBtn   = document.getElementById('ghibli-btn');
+const homeworkBtn = document.getElementById('homework-btn');
+const weatherBtn2 = document.getElementById('weather-btn');
+const searchBtn   = document.getElementById('search-btn');
+
+if (imgGenBtn) imgGenBtn.addEventListener('click', () => {
+  const imgModal = document.getElementById('img-modal-overlay');
+  if (imgModal) { imgModal.style.display = 'flex'; document.getElementById('img-prompt').focus(); }
+});
+if (homeworkBtn) homeworkBtn.addEventListener('click', () => {
+  input.value = 'Help me with my homework: '; input.focus(); autoResize();
+  input.setSelectionRange(input.value.length, input.value.length);
+});
+if (weatherBtn2) weatherBtn2.addEventListener('click', () => {
+  const wm = document.getElementById('weather-modal-overlay');
+  if (wm) { wm.style.display = 'flex'; document.getElementById('weather-city').focus(); }
+});
+if (searchBtn) searchBtn.addEventListener('click', () => {
+  const q = prompt('What do you want to search for?');
+  if (!q || !q.trim()) return;
+  input.value = 'Search: ' + q.trim(); autoResize(); form.requestSubmit();
+});
+
+const ghibliModal     = document.getElementById('ghibli-modal-overlay');
+const ghibliUploadArea= document.getElementById('ghibli-upload-area');
+const ghibliFileInput = document.getElementById('ghibli-file-input');
+const ghibliPreviewWrap=document.getElementById('ghibli-preview-wrap');
+const ghibliPreview   = document.getElementById('ghibli-preview');
+const ghibliResult    = document.getElementById('ghibli-result');
+const ghibliResultWrap= document.getElementById('ghibli-result-wrap');
+const ghibliLoading   = document.getElementById('ghibli-loading');
+const ghibliError     = document.getElementById('ghibli-error');
+const ghibliGenerateBtn=document.getElementById('ghibli-generate-btn');
+const ghibliCloseBtn  = document.getElementById('ghibli-close-btn');
+const ghibliDownloadBtn=document.getElementById('ghibli-download-btn');
+const ghibliExtraInput= document.getElementById('ghibli-extra');
+
+let ghibliBase64 = null;
+let ghibliSelectedStyle = 'Studio Ghibli portrait, Spirited Away style, soft watercolor anime art';
+
+if (ghibliBtn) ghibliBtn.addEventListener('click', () => {
+  ghibliModal.style.display = 'flex';
+  ghibliBase64 = null;
+  ghibliPreviewWrap.style.display = 'none';
+  ghibliResultWrap.style.display = 'none';
+  ghibliError.style.display = 'none';
+  ghibliLoading.style.display = 'none';
+});
+if (ghibliCloseBtn) ghibliCloseBtn.addEventListener('click', () => ghibliModal.style.display = 'none');
+ghibliModal.addEventListener('click', e => { if (e.target === ghibliModal) ghibliModal.style.display = 'none'; });
+
+document.querySelectorAll('.ghibli-style-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.ghibli-style-btn').forEach(b => {
+      b.style.borderColor = 'var(--border)'; b.style.background = 'var(--panel)'; b.style.color = 'var(--muted)';
+    });
+    btn.style.borderColor = 'var(--accent)'; btn.style.background = 'var(--accent-dim)'; btn.style.color = 'var(--accent)';
+    ghibliSelectedStyle = btn.dataset.style;
+  });
+});
+
+ghibliUploadArea.addEventListener('click', () => ghibliFileInput.click());
+ghibliUploadArea.addEventListener('dragover', e => { e.preventDefault(); ghibliUploadArea.style.borderColor = 'var(--accent)'; });
+ghibliUploadArea.addEventListener('dragleave', () => { ghibliUploadArea.style.borderColor = 'var(--border)'; });
+ghibliUploadArea.addEventListener('drop', e => {
+  e.preventDefault(); ghibliUploadArea.style.borderColor = 'var(--border)';
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) loadGhibliPhoto(file);
+});
+ghibliFileInput.addEventListener('change', () => {
+  if (ghibliFileInput.files[0]) loadGhibliPhoto(ghibliFileInput.files[0]);
+});
+
+function loadGhibliPhoto(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    ghibliBase64 = e.target.result.split(',')[1];
+    ghibliPreview.src = e.target.result;
+    ghibliPreviewWrap.style.display = 'block';
+    ghibliResultWrap.style.display = 'none';
+    ghibliError.style.display = 'none';
+    ghibliUploadArea.style.borderColor = 'var(--accent)';
+  };
+  reader.readAsDataURL(file);
+}
+
+ghibliGenerateBtn.addEventListener('click', async () => {
+  if (!ghibliBase64) {
+    ghibliError.textContent = 'Please upload your photo first!';
+    ghibliError.style.display = 'block'; return;
+  }
+  ghibliError.style.display = 'none';
+  ghibliResultWrap.style.display = 'none';
+  ghibliLoading.style.display = 'block';
+  ghibliGenerateBtn.disabled = true;
+
+  const extra = ghibliExtraInput.value.trim();
+  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
+
+  try {
+    const r = await fetch('/api/generate-image', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ prompt, style: '' })
+    });
+    const d = await r.json();
+    ghibliLoading.style.display = 'none';
+    if (d.image) {
+      ghibliResult.src = 'data:image/png;base64,' + d.image;
+      ghibliResultWrap.style.display = 'block';
+      clearEmptyState();
+      const row = document.createElement('div'); row.className = 'msg-row ai';
+      const bubble = document.createElement('div'); bubble.className = 'msg ai';
+      bubble.style.padding = '8px';
+      const cap = document.createElement('div');
+      cap.textContent = '🌿 Your Ghibli portrait';
+      cap.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:8px;';
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,' + d.image;
+      img.style.cssText = 'max-width:100%;border-radius:12px;display:block;cursor:pointer;';
+      img.title = 'Click to download';
+      img.addEventListener('click', () => downloadGhibliImage(d.image));
+      bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
+      messagesEl.appendChild(row); scrollToBottom();
+    } else {
+      ghibliError.textContent = d.error || 'Generation failed. Try again.';
+      ghibliError.style.display = 'block';
+    }
+  } catch (e) {
+    ghibliLoading.style.display = 'none';
+    ghibliError.textContent = 'Error: ' + e.message;
+    ghibliError.style.display = 'block';
+  } finally { ghibliGenerateBtn.disabled = false; }
+});
+
+function downloadGhibliImage(b64) {
+  const a = document.createElement('a');
+  a.href = 'data:image/png;base64,' + b64;
+  a.download = 'mythic-ai-ghibli-portrait.png';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+if (ghibliDownloadBtn) ghibliDownloadBtn.addEventListener('click', () => {
+  if (ghibliResult.src) downloadGhibliImage(ghibliResult.src.split(',')[1]);
+});
+
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 const settingsBtn        = document.getElementById('settings-btn');
 const settingsModalOverlay=document.getElementById('settings-modal-overlay');
@@ -1642,26 +1737,22 @@ const toneSelect         = document.getElementById('tone-select');
 const lengthSelect       = document.getElementById('length-select');
 const customInstructions = document.getElementById('custom-instructions-input');
 
-// Load saved settings
 function loadSettings() {
+  if (!settingsModalOverlay) return;
   const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
-  // Theme
   const theme = s.theme || 'dark';
   applyTheme(theme);
   document.querySelectorAll('[data-group="theme"]').forEach(b => {
     b.style.borderColor = b.dataset.value === theme ? 'var(--accent)' : 'var(--border)';
     b.style.color = b.dataset.value === theme ? 'var(--accent)' : '';
   });
-  // Accent
   const accent = s.accent || '#10a37f';
-  accentColorInput.value = accent;
+  if (accentColorInput) accentColorInput.value = accent;
   document.documentElement.style.setProperty('--accent', accent);
-  // Font size
   const fs = s.fontSize || '14.5';
-  fontSizeSlider.value = fs;
-  fontSizeLabel.textContent = fs + 'px';
+  if (fontSizeSlider) fontSizeSlider.value = fs;
+  if (fontSizeLabel) fontSizeLabel.textContent = fs + 'px';
   document.documentElement.style.setProperty('--msg-font-size', fs + 'px');
-  // Bubble style
   const bubble = s.bubble || 'comfortable';
   document.body.classList.remove('bubble-compact','bubble-comfortable','bubble-spacious');
   document.body.classList.add('bubble-' + bubble);
@@ -1669,18 +1760,16 @@ function loadSettings() {
     b.style.borderColor = b.dataset.value === bubble ? 'var(--accent)' : 'var(--border)';
     b.style.color = b.dataset.value === bubble ? 'var(--accent)' : '';
   });
-  // Tone & Length
   if (toneSelect) toneSelect.value = s.tone || 'default';
   if (lengthSelect) lengthSelect.value = s.length || 'default';
-  // Custom instructions
   if (customInstructions) customInstructions.value = s.customInstructions || '';
 }
 
 function saveSettings() {
   const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
   s.theme = document.body.classList.contains('theme-light') ? 'light' : 'dark';
-  s.accent = accentColorInput.value;
-  s.fontSize = fontSizeSlider.value;
+  s.accent = accentColorInput ? accentColorInput.value : (s.accent || '#10a37f');
+  s.fontSize = fontSizeSlider ? fontSizeSlider.value : (s.fontSize || '14.5');
   const bubs = ['compact','comfortable','spacious'].find(b => document.body.classList.contains('bubble-'+b)) || 'comfortable';
   s.bubble = bubs;
   s.tone = toneSelect ? toneSelect.value : 'default';
@@ -1698,9 +1787,9 @@ function applyTheme(t) {
   }
 }
 
-settingsBtn.addEventListener('click', () => { settingsModalOverlay.style.display = 'flex'; });
-settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
-settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
+if (settingsBtn) settingsBtn.addEventListener('click', () => { if (settingsModalOverlay) settingsModalOverlay.style.display = 'flex'; });
+if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
+if (settingsModalOverlay) settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
 document.querySelectorAll('.settings-choice').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -1718,10 +1807,10 @@ document.querySelectorAll('.settings-choice').forEach(btn => {
   });
 });
 
-accentColorInput.addEventListener('input', () => {
+if (accentColorInput) accentColorInput.addEventListener('input', () => {
   document.documentElement.style.setProperty('--accent', accentColorInput.value);
 });
-fontSizeSlider.addEventListener('input', () => {
+if (fontSizeSlider) fontSizeSlider.addEventListener('input', () => {
   fontSizeLabel.textContent = fontSizeSlider.value + 'px';
   document.documentElement.style.setProperty('--msg-font-size', fontSizeSlider.value + 'px');
 });
@@ -1732,35 +1821,25 @@ loadSettings();
 function renderMarkdown(text) {
   const div = document.createElement('div');
   div.className = 'msg-text md-rendered';
-  // Escape HTML first
   let html = text
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  // Code blocks (must come before inline code)
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
     `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`);
-  // Inline code
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // Italic
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  // Headers
   html = html.replace(/^### (.+)$/gm, '<h3 style="font-size:14px;margin:6px 0 3px;font-weight:700;">$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2 style="font-size:15px;margin:8px 0 4px;font-weight:700;">$1</h2>');
   html = html.replace(/^# (.+)$/gm, '<h1 style="font-size:17px;margin:10px 0 5px;font-weight:700;">$1</h1>');
-  // Unordered lists
   html = html.replace(/(^|\n)([\-\*] .+(\n[\-\*] .+)*)/g, (_, pre, block) =>
     pre + '<ul>' + block.replace(/[\-\*] (.+)/g, '<li>$1</li>') + '</ul>');
-  // Ordered lists
   html = html.replace(/(^|\n)(\d+\. .+(\n\d+\. .+)*)/g, (_, pre, block) =>
     pre + '<ol>' + block.replace(/\d+\. (.+)/g, '<li>$1</li>') + '</ol>');
-  // Line breaks
   html = html.replace(/\n/g, '<br>');
   div.innerHTML = html;
   return div;
 }
 
-// Override addMessage to use markdown for AI
 const _origAddMessage = addMessage;
 function addMessage(role, text, attachment) {
   const textNode = _origAddMessage(role, text, attachment);
@@ -1775,19 +1854,6 @@ function addMessage(role, text, attachment) {
 }
 
 // ─── MESSAGE TIMESTAMPS ───────────────────────────────────────────────────────
-const _origAddMsg2 = addMessage;
-function addMessageWithTimestamp(role, text, attachment) {
-  const node = _origAddMsg2(role, text, attachment);
-  const row = node.closest ? node.closest('.msg-row') : null;
-  if (row) {
-    const ts = document.createElement('div');
-    ts.className = 'msg-timestamp';
-    ts.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    row.appendChild(ts);
-  }
-  return node;
-}
-// Monkey-patch addMessage to include timestamp
 const _rawAdd = addMessage;
 window._addMsgFinal = function(role, text, attachment) {
   const node = _rawAdd(role, text, attachment);
@@ -1888,9 +1954,8 @@ function addSearchUI() {
 }
 const msgSearchWrap = addSearchUI();
 
-// Keyboard shortcut Ctrl+F to search messages
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !settingsModalOverlay.style.display.includes('flex')) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !(settingsModalOverlay && settingsModalOverlay.style.display.includes('flex'))) {
     e.preventDefault();
     msgSearchWrap.style.display = 'flex';
     setTimeout(() => document.getElementById('msg-search-input').focus(), 50);
@@ -1902,7 +1967,6 @@ document.addEventListener('keydown', e => {
 const installBtn = document.getElementById('install-btn');
 let deferredInstallPrompt = null;
 
-// Android / Chrome Desktop: capture the install prompt
 window.addEventListener('beforeinstallprompt', e => {
   e.preventDefault();
   deferredInstallPrompt = e;
@@ -1912,24 +1976,19 @@ window.addEventListener('beforeinstallprompt', e => {
 
 installBtn.addEventListener('click', async () => {
   if (deferredInstallPrompt) {
-    // Android / Chrome Desktop
     deferredInstallPrompt.prompt();
     const { outcome } = await deferredInstallPrompt.userChoice;
     if (outcome === 'accepted') installBtn.style.display = 'none';
     deferredInstallPrompt = null;
   } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-    // iOS Safari — show instructions modal
     showIOSInstallModal();
   } else if (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches) {
-    // Already installed
     installBtn.style.display = 'none';
   } else {
-    // Fallback for other browsers — bookmark prompt
     alert('To install:\n\n• Chrome/Edge: Click ⋮ menu → "Install app"\n• Samsung Browser: Tap ⋮ → "Add page to"\n• Firefox: Tap ⋮ → "Install"\n• Safari (iOS): Tap Share → "Add to Home Screen"');
   }
 });
 
-// Show iOS-specific instructions
 function showIOSInstallModal() {
   const m = document.createElement('div');
   m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9999;display:flex;align-items:flex-end;justify-content:center;padding:20px;';
@@ -1946,16 +2005,13 @@ function showIOSInstallModal() {
   m.addEventListener('click', e => { if(e.target===m) m.remove(); });
 }
 
-// Hide install button if already installed
 if (window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) {
   installBtn.style.display = 'none';
 } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
-  // Show on iOS too since beforeinstallprompt won't fire
   installBtn.style.display = 'flex';
   installBtn.style.alignItems = 'center';
 }
 
-// Track install completion
 window.addEventListener('appinstalled', () => {
   installBtn.style.display = 'none';
   deferredInstallPrompt = null;
@@ -1963,12 +2019,10 @@ window.addEventListener('appinstalled', () => {
 
 // ─── SERVICE WORKER (for offline + PWA) ──────────────────────────────────────
 if ('serviceWorker' in navigator) {
-  // Register via the /sw.js route served by Flask
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
 // ─── WIRE REACTIONS INTO MSG ACTIONS ─────────────────────────────────────────
-// Patch buildMsgActions to add reaction button
 const _origBuildActions = buildMsgActions;
 function buildMsgActions(row, textNode, role) {
   const actions = _origBuildActions(row, textNode, role);
@@ -1977,7 +2031,6 @@ function buildMsgActions(row, textNode, role) {
     reactBtn.type = 'button'; reactBtn.title = 'React'; reactBtn.textContent = '😊';
     reactBtn.addEventListener('click', () => addReactionBar(row));
     actions.appendChild(reactBtn);
-    // 🔊 speak button
     const sp = document.createElement('button');
     sp.type='button'; sp.title='Read aloud'; sp.textContent='🔊';
     sp.addEventListener('click', () => {
@@ -2014,10 +2067,7 @@ function getTonePrefix() {
 }
 
 // ─── AUTO FOLLOW-UPS AFTER AI REPLY ──────────────────────────────────────────
-// Hook into streamReply completion by patching the form submit
-const _origFormSubmit = form.onsubmit;
 form.addEventListener('submit', async () => {
-  // Wait for generation to finish then add follow-ups
   const checkDone = setInterval(() => {
     if (!isGenerating) {
       clearInterval(checkDone);
@@ -2032,164 +2082,6 @@ form.addEventListener('submit', async () => {
       }
     }
   }, 500);
-});
-
-// ─── INITIAL LOAD ─────────────────────────────────────────────────────────────
-(async () => {
-  const convs = await loadConversationList();
-  if (convs.length > 0) openConversation(convs[0].id);
-  else showEmptyState();
-})();
-
-const imgGenBtn   = document.getElementById('img-gen-btn');
-const ghibliBtn   = document.getElementById('ghibli-btn');
-const homeworkBtn = document.getElementById('homework-btn');
-const weatherBtn2 = document.getElementById('weather-btn');
-const searchBtn   = document.getElementById('search-btn');
-
-if (imgGenBtn) imgGenBtn.addEventListener('click', () => {
-  const imgModal = document.getElementById('img-modal-overlay');
-  if (imgModal) { imgModal.style.display = 'flex'; document.getElementById('img-prompt').focus(); }
-});
-if (homeworkBtn) homeworkBtn.addEventListener('click', () => {
-  input.value = 'Help me with my homework: '; input.focus(); autoResize();
-  input.setSelectionRange(input.value.length, input.value.length);
-});
-if (weatherBtn2) weatherBtn2.addEventListener('click', () => {
-  const wm = document.getElementById('weather-modal-overlay');
-  if (wm) { wm.style.display = 'flex'; document.getElementById('weather-city').focus(); }
-});
-if (searchBtn) searchBtn.addEventListener('click', () => {
-  const q = prompt('What do you want to search for?');
-  if (!q || !q.trim()) return;
-  input.value = 'Search: ' + q.trim(); autoResize(); form.requestSubmit();
-});
-
-// ─── GHIBLI SELFIE MODAL ─────────────────────────────────────────────────────
-const ghibliModal     = document.getElementById('ghibli-modal-overlay');
-const ghibliUploadArea= document.getElementById('ghibli-upload-area');
-const ghibliFileInput = document.getElementById('ghibli-file-input');
-const ghibliPreviewWrap=document.getElementById('ghibli-preview-wrap');
-const ghibliPreview   = document.getElementById('ghibli-preview');
-const ghibliResult    = document.getElementById('ghibli-result');
-const ghibliResultWrap= document.getElementById('ghibli-result-wrap');
-const ghibliLoading   = document.getElementById('ghibli-loading');
-const ghibliError     = document.getElementById('ghibli-error');
-const ghibliGenerateBtn=document.getElementById('ghibli-generate-btn');
-const ghibliCloseBtn  = document.getElementById('ghibli-close-btn');
-const ghibliDownloadBtn=document.getElementById('ghibli-download-btn');
-const ghibliExtraInput= document.getElementById('ghibli-extra');
-
-let ghibliBase64 = null;
-let ghibliSelectedStyle = 'Studio Ghibli portrait, Spirited Away style, soft watercolor anime art';
-
-// Open/close
-if (ghibliBtn) ghibliBtn.addEventListener('click', () => {
-  ghibliModal.style.display = 'flex';
-  ghibliBase64 = null;
-  ghibliPreviewWrap.style.display = 'none';
-  ghibliResultWrap.style.display = 'none';
-  ghibliError.style.display = 'none';
-  ghibliLoading.style.display = 'none';
-});
-if (ghibliCloseBtn) ghibliCloseBtn.addEventListener('click', () => ghibliModal.style.display = 'none');
-ghibliModal.addEventListener('click', e => { if (e.target === ghibliModal) ghibliModal.style.display = 'none'; });
-
-// Style selector
-document.querySelectorAll('.ghibli-style-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.ghibli-style-btn').forEach(b => {
-      b.style.borderColor = 'var(--border)'; b.style.background = 'var(--panel)'; b.style.color = 'var(--muted)';
-    });
-    btn.style.borderColor = 'var(--accent)'; btn.style.background = 'var(--accent-dim)'; btn.style.color = 'var(--accent)';
-    ghibliSelectedStyle = btn.dataset.style;
-  });
-});
-
-// Upload area
-ghibliUploadArea.addEventListener('click', () => ghibliFileInput.click());
-ghibliUploadArea.addEventListener('dragover', e => { e.preventDefault(); ghibliUploadArea.style.borderColor = 'var(--accent)'; });
-ghibliUploadArea.addEventListener('dragleave', () => { ghibliUploadArea.style.borderColor = 'var(--border)'; });
-ghibliUploadArea.addEventListener('drop', e => {
-  e.preventDefault(); ghibliUploadArea.style.borderColor = 'var(--border)';
-  const file = e.dataTransfer.files[0];
-  if (file && file.type.startsWith('image/')) loadGhibliPhoto(file);
-});
-ghibliFileInput.addEventListener('change', () => {
-  if (ghibliFileInput.files[0]) loadGhibliPhoto(ghibliFileInput.files[0]);
-});
-
-function loadGhibliPhoto(file) {
-  const reader = new FileReader();
-  reader.onload = e => {
-    ghibliBase64 = e.target.result.split(',')[1];
-    ghibliPreview.src = e.target.result;
-    ghibliPreviewWrap.style.display = 'block';
-    ghibliResultWrap.style.display = 'none';
-    ghibliError.style.display = 'none';
-    ghibliUploadArea.style.borderColor = 'var(--accent)';
-  };
-  reader.readAsDataURL(file);
-}
-
-// Generate Ghibli image
-ghibliGenerateBtn.addEventListener('click', async () => {
-  if (!ghibliBase64) {
-    ghibliError.textContent = 'Please upload your photo first!';
-    ghibliError.style.display = 'block'; return;
-  }
-  ghibliError.style.display = 'none';
-  ghibliResultWrap.style.display = 'none';
-  ghibliLoading.style.display = 'block';
-  ghibliGenerateBtn.disabled = true;
-
-  const extra = ghibliExtraInput.value.trim();
-  const prompt = `${ghibliSelectedStyle}, beautiful detailed portrait of a person, ${extra ? extra + ', ' : ''}masterpiece, best quality, highly detailed, cinematic lighting, soft colors, dreamy atmosphere`;
-
-  try {
-    const r = await fetch('/api/generate-image', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ prompt, style: '' })
-    });
-    const d = await r.json();
-    ghibliLoading.style.display = 'none';
-    if (d.image) {
-      ghibliResult.src = 'data:image/png;base64,' + d.image;
-      ghibliResultWrap.style.display = 'block';
-      // Also show in chat
-      clearEmptyState();
-      const row = document.createElement('div'); row.className = 'msg-row ai';
-      const bubble = document.createElement('div'); bubble.className = 'msg ai';
-      bubble.style.padding = '8px';
-      const cap = document.createElement('div');
-      cap.textContent = '🌿 Your Ghibli portrait';
-      cap.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:8px;';
-      const img = document.createElement('img');
-      img.src = 'data:image/png;base64,' + d.image;
-      img.style.cssText = 'max-width:100%;border-radius:12px;display:block;cursor:pointer;';
-      img.title = 'Click to download';
-      img.addEventListener('click', () => downloadGhibliImage(d.image));
-      bubble.appendChild(cap); bubble.appendChild(img); row.appendChild(bubble);
-      messagesEl.appendChild(row); scrollToBottom();
-    } else {
-      ghibliError.textContent = d.error || 'Generation failed. Try again.';
-      ghibliError.style.display = 'block';
-    }
-  } catch (e) {
-    ghibliLoading.style.display = 'none';
-    ghibliError.textContent = 'Error: ' + e.message;
-    ghibliError.style.display = 'block';
-  } finally { ghibliGenerateBtn.disabled = false; }
-});
-
-function downloadGhibliImage(b64) {
-  const a = document.createElement('a');
-  a.href = 'data:image/png;base64,' + b64;
-  a.download = 'mythic-ai-ghibli-portrait.png';
-  document.body.appendChild(a); a.click(); a.remove();
-}
-if (ghibliDownloadBtn) ghibliDownloadBtn.addEventListener('click', () => {
-  if (ghibliResult.src) downloadGhibliImage(ghibliResult.src.split(',')[1]);
 });
 
 // ─── IMAGE GENERATION MODAL JS ───────────────────────────────────────────────
@@ -2337,7 +2229,6 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
-  // API calls — network only, no cache
   if (e.request.url.includes('/api/')) return;
   e.respondWith(
     fetch(e.request).then(resp => {
@@ -2356,10 +2247,7 @@ self.addEventListener('fetch', e => {
 @app.route("/icon.png")
 @app.route("/icon-512.png")
 def pwa_icon():
-    """Generate a simple SVG icon as PNG fallback using base64 embedded PNG."""
-    # Minimal 1x1 green PNG (browsers will use the SVG apple-touch-icon first)
-    import base64 as _b64
-    # 192x192 green PNG with M letter (base64 encoded minimal PNG)
+    """Generate a simple SVG icon as a PNG-route fallback."""
     svg = b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
 <rect width="192" height="192" rx="40" fill="#10a37f"/>
 <text x="96" y="140" text-anchor="middle" font-size="120" font-family="Arial,sans-serif" font-weight="bold" fill="white">M</text>
@@ -2513,8 +2401,7 @@ def groq_stream_chunks(messages):
                         yield content
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
-            return  # success — stop here
-        # rate limited or error — fall through (return without yielding)
+            return
     except requests.RequestException:
         pass
 
@@ -2558,7 +2445,6 @@ def huggingface_stream_chunks(messages):
     """Stream from Hugging Face Inference API (free tier available)."""
     if not HF_API_KEY:
         return
-    # HF uses the same OpenAI-compatible endpoint format
     try:
         resp = requests.post(
             f"https://api-inference.huggingface.co/models/{HF_MODEL}/v1/chat/completions",
@@ -2587,7 +2473,6 @@ def huggingface_stream_chunks(messages):
     except requests.RequestException as e:
         yield f"[OpenRouter connection error: {e}]"
         return
-
 
 
 def cerebras_stream_chunks(messages):
@@ -2624,22 +2509,15 @@ def cerebras_stream_chunks(messages):
         return
 
 
-# --- Round-robin provider rotation ------------------------------------------
-# Tracks which provider index to try FIRST next time (persists for the life
-# of the process; resets on server restart, which is fine).
 _provider_index = [0]
 
 
 def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
-    """True round-robin rotation across all configured providers.
-    No provider is primary — starts from wherever the last successful call left off.
-    If the current provider fails/is rate-limited, moves to the next one and
-    remembers that position for the next request too."""
+    """True round-robin rotation across all configured providers."""
     sp = system_prompt or SYSTEM_PROMPT
     openai_msgs = to_openai_messages(gemini_messages, sp)
     ollama_msgs = to_ollama_messages(gemini_messages, sp)
 
-    # Build the full list of available providers (only those with keys)
     all_providers = []
     if PROVIDER in ("auto", "gemini") and GEMINI_API_KEY:
         all_providers.append(("Gemini", lambda: gemini_stream_chunks(gemini_payload)))
@@ -2650,7 +2528,6 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
     if PROVIDER == "openrouter" and OPENROUTER_API_KEY:
         all_providers.append(("OpenRouter", lambda: openrouter_stream_chunks(openai_msgs)))
     if PROVIDER == "huggingface" and HF_API_KEY:
-        # HuggingFace free tier blocks server IPs (Render etc) — only use if explicitly set
         all_providers.append(("HuggingFace", lambda: huggingface_stream_chunks(openai_msgs)))
     if PROVIDER == "ollama":
         all_providers.append(("Ollama", lambda: ollama_stream_chunks(ollama_msgs)))
@@ -2662,7 +2539,6 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
     n = len(all_providers)
     start = _provider_index[0] % n
 
-    # Try each provider starting from the current rotation position
     for i in range(n):
         idx = (start + i) % n
         name, fn = all_providers[idx]
@@ -2672,22 +2548,16 @@ def auto_stream_chunks(gemini_payload, gemini_messages, system_prompt=None):
                 collected.append(chunk)
                 yield chunk
             if collected:
-                # Success — next request starts from the NEXT provider (true rotation)
                 _provider_index[0] = (idx + 1) % n
                 return
         except Exception:
             pass
-        # This provider failed — silently try the next one
 
     yield "[All AI providers failed or are rate-limited. Try again in a moment.]"
 
 
-
-
 def gemini_stream_chunks(payload):
-    """Yields plain text increments from Gemini's SSE stream.
-    Returns nothing (silently) on auth/quota/rate-limit errors so the
-    round-robin rotation automatically falls through to the next provider."""
+    """Yields plain text increments from Gemini's SSE stream."""
     try:
         resp = requests.post(
             GEMINI_STREAM_URL,
@@ -2697,11 +2567,9 @@ def gemini_stream_chunks(payload):
             timeout=60,
         )
     except requests.RequestException:
-        return  # network error — silently fall through
+        return
 
     if resp.status_code != 200:
-        # Auth errors (401/403), quota errors (429), and server errors (5xx)
-        # all mean "try the next provider" — don't yield anything.
         return
 
     for raw_line in resp.iter_lines(decode_unicode=True):
@@ -2728,8 +2596,8 @@ def chat():
     data = request.get_json(force=True) or {}
     user_message = (data.get("message") or "").strip()
     conv_id = data.get("conversation_id")
-    attachment = data.get("attachment")  # {name, mimeType, dataBase64} or None
-    user_name = (data.get("user_name") or "").strip()[:60]  # what Mythic AI should call the user
+    attachment = data.get("attachment")
+    user_name = (data.get("user_name") or "").strip()[:60]
     regenerate = bool(data.get("regenerate"))
 
     if regenerate:
@@ -2757,8 +2625,6 @@ def chat():
     messages = conv.setdefault("messages", [])
 
     if regenerate:
-        # Drop the most recent assistant reply (if any) so a fresh one replaces it.
-        # Leaves the preceding user message in place to regenerate against.
         if messages and messages[-1]["role"] == "model":
             messages.pop()
         if not messages or messages[-1]["role"] != "user":
@@ -2780,7 +2646,6 @@ def chat():
             user_entry["attachment_meta"] = attachment_meta
         messages.append(user_entry)
 
-    # Strip attachment_meta (frontend-only field) before sending to the model
     gemini_contents = [
         {"role": m["role"], "parts": m["parts"]} for m in messages
     ]
@@ -2790,11 +2655,8 @@ def chat():
         effective_system_prompt += (
             f" The user has told you their preferred name is \"{user_name}\". "
             f"Address them as {user_name} naturally where it fits (e.g. greetings, "
-            f"acknowledgements) — don't force it into every single reply."
+            f"acknowledgements) - don't force it into every single reply."
         )
-    # Only the real Gemini call gets the "you have search" instruction — fallback
-    # providers don't have real search, so giving them that instruction makes them
-    # hallucinate fake tool-call JSON into the visible reply.
     gemini_system_prompt = effective_system_prompt + GEMINI_SEARCH_ADDENDUM
 
     payload = {
@@ -2826,11 +2688,11 @@ NANOBANANA_API_KEY = os.environ.get("NANOBANANA_API_KEY", "api-18a42424f3820dd30
 @app.route("/api/models")
 def get_models():
     return jsonify({"models": [
-        {"id": "aarav-1.0",   "name": "Mythic 1",     "desc": "Fast — quick answers",      "vip": False},
-        {"id": "aarav-2.0",   "name": "Mythic 2",     "desc": "Balanced — everyday tasks", "vip": False},
-        {"id": "aarav-2.5",   "name": "Mythic 2.5",   "desc": "Smart — best for most",     "vip": False},
-        {"id": "aarav-3.5",   "name": "Mythic 3",     "desc": "Advanced — complex tasks",  "vip": False},
-        {"id": "aarav-ultra", "name": "Mythic Ultra ✨","desc": "Most powerful — VIP only", "vip": True},
+        {"id": "aarav-1.0",   "name": "Mythic 1",     "desc": "Fast - quick answers",      "vip": False},
+        {"id": "aarav-2.0",   "name": "Mythic 2",     "desc": "Balanced - everyday tasks", "vip": False},
+        {"id": "aarav-2.5",   "name": "Mythic 2.5",   "desc": "Smart - best for most",     "vip": False},
+        {"id": "aarav-3.5",   "name": "Mythic 3",     "desc": "Advanced - complex tasks",  "vip": False},
+        {"id": "aarav-ultra", "name": "Mythic Ultra ✨","desc": "Most powerful - VIP only", "vip": True},
     ], "default": "aarav-2.5"})
 
 
@@ -2956,26 +2818,20 @@ def get_weather():
 @login_required
 def generate_image():
     """Generate or edit images using NanoBanana API (Gemini 3.1 Flash Image).
-    Supports:
-    - text-to-image: just send prompt
-    - image-to-image: send prompt + reference_image (base64) for Ghibli selfie etc.
-    Falls back to Pollinations.ai if NanoBanana fails.
-    """
+    Falls back to Pollinations.ai if NanoBanana fails."""
     import urllib.parse, random
     d = request.get_json(force=True) or {}
     prompt   = (d.get("prompt") or "").strip()
     style    = (d.get("style") or "").strip()
-    ref_b64  = d.get("reference_image")   # base64 image for image-to-image
+    ref_b64  = d.get("reference_image")
     ref_mime = d.get("reference_mime", "image/jpeg")
 
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    # Build full prompt with style
     quality = "masterpiece, best quality, ultra detailed, sharp focus, cinematic lighting"
     full_prompt = f"{prompt}, {style} style, {quality}" if style else f"{prompt}, {quality}"
 
-    # ── 1. Try NanoBanana API ────────────────────────────────────────────────
     if NANOBANANA_API_KEY:
         try:
             headers = {
@@ -2988,7 +2844,6 @@ def generate_image():
                 "response_format": "b64_json",
                 "size": "1024x1024",
             }
-            # Image-to-image mode: include reference image
             if ref_b64:
                 body["image"] = f"data:{ref_mime};base64,{ref_b64}"
 
@@ -3000,14 +2855,12 @@ def generate_image():
             )
             if resp.status_code == 200:
                 rj = resp.json()
-                # Response: {"data": [{"b64_json": "..."}]} or {"data": [{"url": "..."}]}
                 data_list = rj.get("data", [])
                 if data_list:
                     item = data_list[0]
                     if item.get("b64_json"):
                         return jsonify({"image": item["b64_json"], "mime": "image/png"})
                     elif item.get("url"):
-                        # Download the image from URL
                         img_resp = requests.get(item["url"], timeout=30)
                         if img_resp.status_code == 200:
                             return jsonify({
@@ -3019,7 +2872,6 @@ def generate_image():
         except Exception as e:
             print(f"[NanoBanana] exception: {e}")
 
-    # ── 2. Fallback: Pollinations.ai (free, no key) ─────────────────────────
     try:
         encoded = urllib.parse.quote(full_prompt)
         seed = random.randint(1, 999999)
@@ -3036,7 +2888,7 @@ def generate_image():
 @app.route("/api/generate-image-edit", methods=["POST"])
 @login_required
 def generate_image_edit():
-    """Image-to-image edit using NanoBanana — used for Ghibli selfie transformation."""
+    """Image-to-image edit using NanoBanana - used for Ghibli selfie transformation."""
     import urllib.parse, random
     d = request.get_json(force=True) or {}
     prompt   = (d.get("prompt") or "").strip()
@@ -3079,7 +2931,6 @@ def generate_image_edit():
         except Exception as e:
             print(f"[NanoBanana Edit] exception: {e}")
 
-    # Fallback: describe-then-generate
     try:
         encoded = urllib.parse.quote(prompt)
         seed = random.randint(1, 999999)
@@ -3107,7 +2958,7 @@ if __name__ == "__main__":
         active.append(f"HuggingFace({HF_MODEL})")
     if PROVIDER == "ollama":
         active.append(f"Ollama({OLLAMA_MODEL}@{OLLAMA_URL})")
-    providers_str = " → ".join(active) if active else "none configured!"
+    providers_str = " -> ".join(active) if active else "none configured!"
     print(f"Starting Mythic AI at http://localhost:5000")
     print(f"Providers (fallback order): {providers_str}")
     app.run(host="0.0.0.0", port=5000, debug=False)
