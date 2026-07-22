@@ -2798,11 +2798,121 @@ def get_weather():
         return jsonify({"error": str(e)}), 502
 
 
+NANOBANANA_BASE = "https://api.nanobananaapi.ai/api/v1/nanobanana"
+# NanoBanana's real API is a TASK QUEUE, not an instant-response API: you submit
+# a generation job and get a taskId back, then poll a separate endpoint until
+# it's done. NANOBANANA_MAX_WAIT_SECONDS controls how long we're willing to
+# poll inside a single request before giving up and falling through to the
+# next provider.
+#
+# IMPORTANT PLATFORM DIFFERENCE:
+# - Render has no hard request timeout, so it's safe to raise this (e.g. to 60)
+#   via the NANOBANANA_MAX_WAIT_SECONDS env var for more reliable results.
+# - Vercel's Hobby/free tier kills serverless functions after ~10 seconds
+#   total. NanoBanana generation often takes longer than that. The default of
+#   8s here is a deliberately SHORT, safe budget so the request has time to
+#   still fall through to the free Hugging Face/Pollinations tiers within
+#   Vercel's limit, rather than the whole function being killed mid-poll (which
+#   would fail the request entirely with no fallback). On Vercel free tier,
+#   NanoBanana may rarely finish in time - that's a real platform limit, not a
+#   bug. Vercel Pro raises the limit to 60s if you need NanoBanana reliably there.
+NANOBANANA_MAX_WAIT_SECONDS = int(os.environ.get("NANOBANANA_MAX_WAIT_SECONDS", "8"))
+
+
+def _nanobanana_submit(prompt, image_urls=None, num_images=1):
+    """Submit a generation/edit task. Returns a taskId string, or None on failure."""
+    body = {
+        "prompt": prompt,
+        "type": "IMAGETOIMAGE" if image_urls else "TEXTTOIAMGE",  # sic - matches their real API
+        "numImages": num_images,
+    }
+    if image_urls:
+        body["imageUrls"] = image_urls
+    try:
+        resp = requests.post(
+            f"{NANOBANANA_BASE}/generate",
+            headers={"Authorization": f"Bearer {NANOBANANA_API_KEY}", "Content-Type": "application/json"},
+            json=body,
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            rj = resp.json()
+            if rj.get("code") == 200:
+                return rj.get("data", {}).get("taskId")
+            print(f"[NanoBanana] submit rejected: {rj}")
+        else:
+            print(f"[NanoBanana] submit error {resp.status_code}: {resp.text[:300]}")
+    except Exception as e:
+        print(f"[NanoBanana] submit exception: {e}")
+    return None
+
+
+def _nanobanana_poll(task_id, max_wait=None):
+    """Poll record-info until the task succeeds, fails, or max_wait is reached.
+    Returns an image URL string, or None."""
+    import time as _time_mod
+    max_wait = NANOBANANA_MAX_WAIT_SECONDS if max_wait is None else max_wait
+    interval = 2
+    elapsed = 0
+    while elapsed <= max_wait:
+        try:
+            r = requests.get(
+                f"{NANOBANANA_BASE}/record-info",
+                params={"taskId": task_id},
+                headers={"Authorization": f"Bearer {NANOBANANA_API_KEY}"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                rj = r.json()
+                data = rj.get("data", {}) or {}
+                status = data.get("successFlag", data.get("status"))
+                if status == 1:  # SUCCESS
+                    # Response field names for the result URL(s) aren't fully
+                    # documented publicly - try the common possibilities.
+                    resp_obj = data.get("response") if isinstance(data.get("response"), dict) else data
+                    for key in ("resultUrls", "resultImageUrl", "imageUrls", "urls", "images"):
+                        v = resp_obj.get(key)
+                        if v:
+                            return v[0] if isinstance(v, list) else v
+                    print(f"[NanoBanana] task succeeded but no recognizable image field: {rj}")
+                    return None
+                elif status in (2, 3):  # CREATE_TASK_FAILED / GENERATE_FAILED
+                    print(f"[NanoBanana] task failed (status={status}): {rj}")
+                    return None
+                # else status == 0 (GENERATING) - keep polling
+            else:
+                print(f"[NanoBanana] poll error {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"[NanoBanana] poll exception: {e}")
+        _time_mod.sleep(interval)
+        elapsed += interval
+    print(f"[NanoBanana] gave up after {max_wait}s waiting for task {task_id}")
+    return None
+
+
+def _nanobanana_generate(prompt, image_urls=None):
+    """Full submit+poll cycle. Returns (image_bytes, mimetype) or (None, None)."""
+    task_id = _nanobanana_submit(prompt, image_urls=image_urls)
+    if not task_id:
+        return None, None
+    img_url = _nanobanana_poll(task_id)
+    if not img_url:
+        return None, None
+    try:
+        img_resp = requests.get(img_url, timeout=20)
+        if img_resp.status_code == 200:
+            return img_resp.content, img_resp.headers.get("content-type", "image/png")
+    except Exception as e:
+        print(f"[NanoBanana] download exception: {e}")
+    return None, None
+
+
 @app.route("/api/generate-image", methods=["POST"])
 @login_required
 def generate_image():
     """Generate or edit images. Tries, in order:
-    1. NanoBanana API (paid, if NANOBANANA_API_KEY is set)
+    1. NanoBanana API (paid, if NANOBANANA_API_KEY is set) - async task queue,
+       see NANOBANANA_MAX_WAIT_SECONDS above for platform-specific timing notes.
     2. Hugging Face Inference API running Animagine XL - a free, anime-specific
        model (trained on tagged anime/character data) that recognizes named
        characters far more reliably than general-purpose models. Needs a free
@@ -2823,44 +2933,14 @@ def generate_image():
     full_prompt = f"{prompt}, {style} style, {quality}" if style else f"{prompt}, {quality}"
 
     if NANOBANANA_API_KEY:
-        try:
-            headers = {
-                "Authorization": f"Bearer {NANOBANANA_API_KEY}",
-                "Content-Type": "application/json",
-            }
-            body = {
-                "prompt": full_prompt,
-                "model": "nano-banana",
-                "response_format": "b64_json",
-                "size": "1024x1024",
-            }
-            if ref_b64:
-                body["image"] = f"data:{ref_mime};base64,{ref_b64}"
-
-            resp = requests.post(
-                "https://nanobananaapi.ai/api/generate",
-                headers=headers,
-                json=body,
-                timeout=90,
-            )
-            if resp.status_code == 200:
-                rj = resp.json()
-                data_list = rj.get("data", [])
-                if data_list:
-                    item = data_list[0]
-                    if item.get("b64_json"):
-                        return jsonify({"image": item["b64_json"], "mime": "image/png"})
-                    elif item.get("url"):
-                        img_resp = requests.get(item["url"], timeout=30)
-                        if img_resp.status_code == 200:
-                            return jsonify({
-                                "image": base64.b64encode(img_resp.content).decode(),
-                                "mime": img_resp.headers.get("content-type", "image/png")
-                            })
-            else:
-                print(f"[NanoBanana] error {resp.status_code}: {resp.text[:300]}")
-        except Exception as e:
-            print(f"[NanoBanana] exception: {e}")
+        # Note: NanoBanana's imageUrls parameter expects hosted URLs, not raw
+        # base64 - since we only have base64 from uploads and don't have file
+        # hosting wired up, reference-image (editing) requests skip NanoBanana
+        # and go straight to the fallback tiers below.
+        if not ref_b64:
+            img_bytes, mime = _nanobanana_generate(full_prompt)
+            if img_bytes:
+                return jsonify({"image": base64.b64encode(img_bytes).decode(), "mime": mime})
 
     # --- Hugging Face Animagine XL (free, anime/character-specialized) -----
     if HF_API_KEY and not ref_b64:  # this model is text-to-image only, no editing
@@ -2898,7 +2978,13 @@ def generate_image():
 @app.route("/api/generate-image-edit", methods=["POST"])
 @login_required
 def generate_image_edit():
-    """Image-to-image edit using NanoBanana - used for Ghibli selfie transformation."""
+    """Image-to-image edit - used for Ghibli selfie transformation.
+    NOTE: NanoBanana's real API requires image-to-image inputs to be hosted
+    URLs (imageUrls), not raw base64 data. Since this app doesn't have file
+    hosting wired up for uploaded photos, true NanoBanana-based photo editing
+    isn't available here - this falls straight to Pollinations, which
+    generates a NEW image from the text prompt only (it does not edit the
+    uploaded photo directly, just interprets its description via the prompt)."""
     import urllib.parse, random
     d = request.get_json(force=True) or {}
     prompt   = (d.get("prompt") or "").strip()
@@ -2907,39 +2993,6 @@ def generate_image_edit():
 
     if not prompt or not ref_b64:
         return jsonify({"error": "prompt and image required"}), 400
-
-    if NANOBANANA_API_KEY:
-        try:
-            headers = {
-                "Authorization": f"Bearer {NANOBANANA_API_KEY}",
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(
-                "https://nanobananaapi.ai/api/generate",
-                headers=headers,
-                json={
-                    "prompt": prompt,
-                    "model": "nano-banana",
-                    "image": f"data:{ref_mime};base64,{ref_b64}",
-                    "response_format": "b64_json",
-                    "size": "1024x1024",
-                },
-                timeout=90,
-            )
-            if resp.status_code == 200:
-                rj = resp.json()
-                data_list = rj.get("data", [])
-                if data_list:
-                    item = data_list[0]
-                    if item.get("b64_json"):
-                        return jsonify({"image": item["b64_json"], "mime": "image/png"})
-                    elif item.get("url"):
-                        img_resp = requests.get(item["url"], timeout=30)
-                        if img_resp.status_code == 200:
-                            return jsonify({"image": base64.b64encode(img_resp.content).decode(), "mime": "image/png"})
-            print(f"[NanoBanana Edit] error {resp.status_code}: {resp.text[:300]}")
-        except Exception as e:
-            print(f"[NanoBanana Edit] exception: {e}")
 
     try:
         encoded = urllib.parse.quote(prompt)
