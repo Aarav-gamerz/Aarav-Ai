@@ -108,12 +108,13 @@ GEMINI_SEARCH_ADDENDUM = (
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me-" + str(uuid.uuid4()))
+if "FLASK_SECRET_KEY" not in os.environ:
+    print("[WARNING] FLASK_SECRET_KEY is not set - sessions (login state, VIP unlock, "
+          "conversation ownership) will reset every time the process restarts, and on "
+          "serverless platforms (Vercel) will be INCONSISTENT across requests since each "
+          "cold start gets a new random key. Set FLASK_SECRET_KEY as an environment variable.")
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
-
-# --- Base data directory (used by auth storage and, as a fallback, conversation storage) ---
-DATA_DIR = Path(__file__).resolve().parent / "chat_data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Supabase config ---------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -226,9 +227,30 @@ def delete_conversation(username, conv_id):
 
 
 import os as _os
+import tempfile as _tempfile
+
 _BASE_DIR = _os.path.dirname(_os.path.abspath(__file__))
 _DATA_DIR = _os.path.join(_BASE_DIR, "chat_data")
-_os.makedirs(_DATA_DIR, exist_ok=True)
+try:
+    _os.makedirs(_DATA_DIR, exist_ok=True)
+    # Confirm it's actually writable (some platforms allow mkdir but not writes,
+    # or expose a read-only filesystem outside a specific temp path).
+    _test_path = _os.path.join(_DATA_DIR, ".write_test")
+    with open(_test_path, "w") as _f:
+        _f.write("ok")
+    _os.remove(_test_path)
+except OSError:
+    # Read-only filesystem (e.g. Vercel serverless) - fall back to /tmp, which is
+    # writable but EPHEMERAL: files here vanish between invocations/cold starts.
+    # On platforms like this, set SUPABASE_URL/SUPABASE_KEY for real persistence.
+    _DATA_DIR = _os.path.join(_tempfile.gettempdir(), "mythic_ai_chat_data")
+    _os.makedirs(_DATA_DIR, exist_ok=True)
+    if not SUPABASE_URL:
+        print("[WARNING] Local filesystem is read-only (likely a serverless platform "
+              "like Vercel) and no SUPABASE_URL/SUPABASE_KEY is configured. Falling back "
+              "to /tmp for conversation storage, but this is EPHEMERAL - conversations "
+              "will be lost between requests/cold starts. Set SUPABASE_URL and "
+              "SUPABASE_KEY as environment variables for real persistence on serverless.")
 
 def _user_conv_dir(username):
     path = _os.path.join(_DATA_DIR, "conversations", username)
@@ -745,6 +767,28 @@ PAGE = r"""<!DOCTYPE html>
         style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;font-family:inherit;resize:vertical;"></textarea>
     </div>
 
+    <div style="margin-bottom:16px;border-top:1px solid var(--border);padding-top:16px;">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px;">🗣️ Voice (read-aloud) — language</label>
+      <select id="voice-lang-select" style="width:100%;background:var(--bg);border:1.5px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:13px;outline:none;font-family:inherit;margin-bottom:10px;">
+        <option value="" selected>Choose a language...</option>
+        <option value="en">English</option>
+        <option value="hi">Hindi</option>
+        <option value="es">Spanish</option>
+        <option value="fr">French</option>
+        <option value="de">German</option>
+        <option value="it">Italian</option>
+        <option value="pt">Portuguese</option>
+        <option value="ja">Japanese</option>
+        <option value="zh">Chinese</option>
+        <option value="ar">Arabic</option>
+      </select>
+      <div id="voice-picker-wrap" style="display:none;">
+        <div id="voice-picker-status" style="font-size:11.5px;color:var(--muted);margin-bottom:8px;"></div>
+        <div id="voice-picker-female" style="margin-bottom:10px;"></div>
+        <div id="voice-picker-male"></div>
+      </div>
+    </div>
+
     <button id="settings-close-btn" style="width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">Done</button>
   </div>
 </div>
@@ -1033,6 +1077,14 @@ function speak(text) {
   if (!plain) return;
   currentUtterance = new SpeechSynthesisUtterance(plain);
   currentUtterance.rate = 1.05;
+  try {
+    const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
+    if (s.voiceURI) {
+      const voices = window.speechSynthesis.getVoices();
+      const match = voices.find(v => v.voiceURI === s.voiceURI);
+      if (match) { currentUtterance.voice = match; currentUtterance.lang = match.lang; }
+    }
+  } catch {}
   currentUtterance.onstart = () => speakingIndicator.classList.add('show');
   currentUtterance.onend = () => speakingIndicator.classList.remove('show');
   currentUtterance.onerror = () => speakingIndicator.classList.remove('show');
@@ -1572,6 +1624,92 @@ const fontSizeLabel      = document.getElementById('font-size-label');
 const toneSelect         = document.getElementById('tone-select');
 const lengthSelect       = document.getElementById('length-select');
 const customInstructions = document.getElementById('custom-instructions-input');
+const voiceLangSelect    = document.getElementById('voice-lang-select');
+const voicePickerWrap    = document.getElementById('voice-picker-wrap');
+const voicePickerStatus  = document.getElementById('voice-picker-status');
+const voicePickerFemale  = document.getElementById('voice-picker-female');
+const voicePickerMale    = document.getElementById('voice-picker-male');
+
+// ─── VOICE PICKER (language -> up to 5 female + 5 male voices) ──────────────
+const FEMALE_VOICE_HINTS = ['female','zira','susan','samantha','victoria','moira','tessa','karen',
+  'fiona','veena','salli','joanna','kendra','kimberly','ivy','amy','emma','shreya','lekha',
+  'damayanti','yuna','mei','xiaoxiao','ting-ting','sara','laura','paulina','monica','elsa','anna'];
+const MALE_VOICE_HINTS = ['male','david','mark','george','daniel','fred','alex','tom','james','ryan',
+  'arnaud','rishi','ravi','hemant','takumi','yuto','junior','diego','pablo','carlos','klaus','yannick','luca'];
+
+function classifyVoiceGender(voice) {
+  const n = (voice.name || '').toLowerCase();
+  if (FEMALE_VOICE_HINTS.some(h => n.includes(h))) return 'female';
+  if (MALE_VOICE_HINTS.some(h => n.includes(h))) return 'male';
+  return 'unknown';
+}
+
+function renderVoicePicker(langCode) {
+  if (!voicePickerWrap) return;
+  if (!langCode) { voicePickerWrap.style.display = 'none'; return; }
+  if (!window.speechSynthesis) {
+    voicePickerWrap.style.display = 'block';
+    voicePickerStatus.textContent = 'Voice playback is not supported in this browser.';
+    voicePickerFemale.innerHTML = ''; voicePickerMale.innerHTML = '';
+    return;
+  }
+  const all = window.speechSynthesis.getVoices().filter(v => (v.lang || '').toLowerCase().startsWith(langCode.toLowerCase()));
+  let female = all.filter(v => classifyVoiceGender(v) === 'female').slice(0, 5);
+  let male = all.filter(v => classifyVoiceGender(v) === 'male').slice(0, 5);
+  const unknown = all.filter(v => classifyVoiceGender(v) === 'unknown');
+  while (female.length < 5 && unknown.length) female.push(unknown.shift());
+  while (male.length < 5 && unknown.length) male.push(unknown.shift());
+
+  const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
+  const selectedURI = s.voiceURI || '';
+
+  function buildBtns(list, label) {
+    if (!list.length) return `<div style="font-size:11.5px;color:var(--muted);">No ${label.toLowerCase()} voices available for this language on your device.</div>`;
+    return list.map(v => {
+      const active = v.voiceURI === selectedURI;
+      const safeName = v.name.replace(/"/g, '&quot;');
+      const safeUri = v.voiceURI.replace(/"/g, '&quot;');
+      return `<button type="button" class="voice-choice-btn" data-uri="${safeUri}" data-lang="${v.lang}"
+        style="display:block;width:100%;text-align:left;margin-bottom:6px;padding:8px 10px;border-radius:8px;
+        border:1.5px solid ${active ? 'var(--accent)' : 'var(--border)'};background:var(--bg);
+        color:${active ? 'var(--accent)' : 'var(--text)'};cursor:pointer;font-size:12.5px;font-family:inherit;">
+        ${active ? '✓ ' : ''}${safeName}</button>`;
+    }).join('');
+  }
+
+  voicePickerWrap.style.display = 'block';
+  voicePickerStatus.textContent = all.length
+    ? `${all.length} voice(s) found for this language on your device.`
+    : `No voices found for this language on your device yet. Some browsers load voices a moment after the page opens — try reopening Settings, or pick a different language.`;
+  voicePickerFemale.innerHTML = '<div style="font-size:10.5px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px;">FEMALE</div>' + buildBtns(female, 'Female');
+  voicePickerMale.innerHTML = '<div style="font-size:10.5px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px;margin-top:4px;">MALE</div>' + buildBtns(male, 'Male');
+
+  document.querySelectorAll('.voice-choice-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const s2 = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
+      s2.voiceURI = btn.dataset.uri;
+      s2.voiceLang = btn.dataset.lang;
+      localStorage.setItem('mythic_settings', JSON.stringify(s2));
+      renderVoicePicker(langCode);
+    });
+  });
+}
+
+if (voiceLangSelect) {
+  voiceLangSelect.addEventListener('change', () => {
+    const s = JSON.parse(localStorage.getItem('mythic_settings') || '{}');
+    s.voiceLangChoice = voiceLangSelect.value;
+    delete s.voiceURI; delete s.voiceLang; // force re-pick a voice for the new language
+    localStorage.setItem('mythic_settings', JSON.stringify(s));
+    renderVoicePicker(voiceLangSelect.value);
+  });
+}
+
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    if (voiceLangSelect && voiceLangSelect.value) renderVoicePicker(voiceLangSelect.value);
+  };
+}
 
 function loadSettings() {
   if (!settingsModalOverlay) return;
@@ -1599,6 +1737,10 @@ function loadSettings() {
   if (toneSelect) toneSelect.value = s.tone || 'default';
   if (lengthSelect) lengthSelect.value = s.length || 'default';
   if (customInstructions) customInstructions.value = s.customInstructions || '';
+  if (voiceLangSelect) {
+    voiceLangSelect.value = s.voiceLangChoice || '';
+    renderVoicePicker(voiceLangSelect.value);
+  }
 }
 
 function saveSettings() {
@@ -1623,7 +1765,7 @@ function applyTheme(t) {
   }
 }
 
-if (settingsBtn) settingsBtn.addEventListener('click', () => { if (settingsModalOverlay) settingsModalOverlay.style.display = 'flex'; });
+if (settingsBtn) settingsBtn.addEventListener('click', () => { loadSettings(); if (settingsModalOverlay) settingsModalOverlay.style.display = 'flex'; });
 if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', () => { saveSettings(); settingsModalOverlay.style.display = 'none'; });
 if (settingsModalOverlay) settingsModalOverlay.addEventListener('click', e => { if (e.target === settingsModalOverlay) { saveSettings(); settingsModalOverlay.style.display = 'none'; } });
 
@@ -2078,16 +2220,22 @@ self.addEventListener('fetch', e => {
                          headers={"Service-Worker-Allowed": "/"})
 
 
+# Real PNG bytes (base64) for the app icon, matching the in-app header logo.
+# Manifest.json declares these as image/png, so they must actually BE png bytes -
+# many browsers silently reject install icons that mismatch their declared type
+# (e.g. serving SVG at a .png URL), which is why the install icon wasn't showing.
+_ICON_192_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAFT0lEQVR4nO3da3LURgCF0baLBZD9hbUQ1kL2F3YAPwLUYM/YenSrH/ecn1TK1kj3G8mmmDyVQXz8+vl772PgOt8+fXnqfQyllNLtIAyeW72CuPSbGj1bXBlD829k9JzROoZmX9zwqalVCNW/qOHTUu0Qnmt+MeOntdobq1KT4dNDjbvB6TuA8dNLje2dCsD46e3sBg/dQgyfER15JNp9BzB+RnVkm7sCMH5Gt3ejmwMwfmaxZ6tV/x4AZrMpAO/+zGbrZt8NwPiZ1ZbtvhmA8TO79zbsZwCiPQzAuz+reGvLdwMwflbzaNMegYj2KgDv/qzq3rbdAYj2RwDe/Vndy427AxBNAET7HYDHH1Lcbt0dgGgCINpzKR5/yPNr8+4ARBMA0QRAtCfP/yRzByCaAIgmAKIJgGgCIJoAiCYAogmAaAIgmgCIJgCiCYBoAiCaAIgmAKIJgGgfeh/AUf/9/c+rP/vr39d/RhurnP/p/kXYvRP/0owXYharnf+pHoG2nPw9/x37rHj+pwlg70md6SLMYNXzP00AR8xyEUa38nmcIoAzF2Dli3eF1c/9FAGcNcOFGFHCeYsIoJSMi1lTyvmKCaCUnIt6VtJ5igqglKyLe0Ta+YkLoJS8i7xV4nmJDKCUzIv9ltTzERtAKbkX/aXk8xAdQCnZF78Urz8+gFJyR5D6um8J4Ke0MaS93kcEcCNlFCmvcwsBvLD6OFZ/fXsJ4I5VR7Lq6zpDAA+sNpbVXk8tAnjDKqNZ5XW0IIB3zD6e2Y+/NQFsMOuIZj3uKwlgo9nGNNvx9iKAHWYZ1SzHOQIB7DT6uEY/vtEsH0CLD2kadWQtjmumD7k6YvkASsmIwPiPiQiglLUjMP7jYgIoZc0IjP+cqABKWSsC4z8vLoBS1ojA+OuIDKCUuSMw/npiAyhlzgiMv67oAEqZKwLjry8+gFLmiMD42xDATyNHYPztCODGiBEYf1sCeGGkCIy/PQHcMUIExn8NATzQMwLjv44A3tAjAuO/lgDecWUExn89AWxwRQTG34cANmoZgfH3I4AdRvjt0BbGv50Adhp9XKMf32gEcMCoIxv1uEYmgINGG9toxzMLAZwwyuhGOY4ZCeCk3uPr/f1nJ4AKeo3Q+M8TQCVXj9H46xBARVeN0vjrEUBlrcdp/HUJoIFWIzX++gTQSO2xGn8bAmio1miNvx0BNHZ2vMbflgAucHTExt+eAC6yd8zGfw0BXGjrqI3/Oh96H0CaX+O+9w9hDP96AujE2MfgEYhoAiCaAIgmAKIJgGgCIJoAiCYAogmAaAIgmgCIJgCiCYBoAiCaAIgmAKIJgGgCIJoAiCYAogmAaAIg2hQB+GjBvlY+/1MEAK1ME4DP1uxr1fM/TQCl+GzN3lY8/08fv37+3vsgjvDZmn2tcv6nDQBqmOoRCGoTANEEQDQBEE0ARBMA0QRANAEQTQBEEwDRBEA0ARBNAEQTANEEQLTnb5++PPU+COjh26cvT+4ARBMA0QRAtOdS/n8W6n0gcKVfm3cHIJoAiPY7AI9BpLjdujsA0QRAtD8C8BjE6l5u3B2AaK8CcBdgVfe27Q5AtLsBuAuwmkebfngHEAGreGvLHoGI9mYA7gLM7r0Nv3sHEAGz2rLdTY9AImA2WzfrZwCibQ7AXYBZ7NnqrjuACBjd3o3ufgQSAaM6ss1TY/b/GGYEZ96UT/0Q7G5Ab2c3ePq3QCKglxrbqzpej0RcoeabbtW/B3A3oLXaG2s2WHcDamr15tr8HVsInNH6qeLSRxYxsMWVj9LdntnFwK1ePz8O80OrILKM8guTH+D55XJ6T5p5AAAAAElFTkSuQmCC"
+_ICON_512_PNG_B64 = "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"
+
 @app.route("/icon.png")
-@app.route("/icon-512.png")
-def pwa_icon():
-    """Generate a simple SVG icon as a PNG-route fallback."""
-    svg = b'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-<rect width="192" height="192" rx="40" fill="#10a37f"/>
-<text x="96" y="140" text-anchor="middle" font-size="120" font-family="Arial,sans-serif" font-weight="bold" fill="white">M</text>
-</svg>'''
+def pwa_icon_192():
     from flask import Response as FlaskResponse
-    return FlaskResponse(svg, mimetype="image/svg+xml")
+    return FlaskResponse(base64.b64decode(_ICON_192_PNG_B64), mimetype="image/png")
+
+@app.route("/icon-512.png")
+def pwa_icon_512():
+    from flask import Response as FlaskResponse
+    return FlaskResponse(base64.b64decode(_ICON_512_PNG_B64), mimetype="image/png")
 
 
 @app.route("/")
